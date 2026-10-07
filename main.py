@@ -360,4 +360,6 @@ async def on_command_error(ctx, error):
     )
 
 
+import os
+
 bot.run(os.getenv("DISCORD_TOKEN"))
