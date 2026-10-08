@@ -11,6 +11,9 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Удаляем стандартную команду help, чтобы не было конфликтов
+bot.remove_command("help")
+
 
 @bot.event
 async def on_ready():
@@ -33,15 +36,21 @@ def is_server_owner():
 
 
 # ==========================================
-# ИНТЕРАКТИВНАЯ АДМИН-ПАНЕЛЬ (МОДАЛКИ И КНОПКИ)
+# ИНТЕРАКТИВНАЯ АДМИН-ПАНЕЛЬ С ВЫБОРОМ МУТА
 # ==========================================
 
 
 class ModModal(discord.ui.Modal):
 
-  def __init__(self, action_type: str):
-    super().__init__(title=f"Управление: {action_type.upper()}")
+  def __init__(self, action_type: str, mute_duration: int = 10):
+    title_map = {
+        "ban": "Бан участника",
+        "kick": "Кик участника",
+        "mute": f"Мут на {mute_duration} мин.",
+    }
+    super().__init__(title=title_map.get(action_type, "Модерация"))
     self.action_type = action_type
+    self.mute_duration = mute_duration
 
     self.target_id = discord.ui.TextInput(
         label="ID или Упоминание (например: 12345678)",
@@ -60,9 +69,7 @@ class ModModal(discord.ui.Modal):
 
   async def on_submit(self, interaction: discord.Interaction):
     try:
-      member_id = int(
-          self.target_id.value.strip("<@!>")
-      )  # Очищаем от лишних символов упоминания
+      member_id = int(self.target_id.value.strip("<@!>"))
       member = interaction.guild.get_member(member_id)
       if not member:
         await interaction.response.send_message(
@@ -72,8 +79,8 @@ class ModModal(discord.ui.Modal):
     except ValueError:
       await interaction.response.send_message(
           "❌ Неверный формат ID пользователя!", ephemeral=True
-      )
-      return
+        )
+        return
 
     reason_text = (
         self.reason.value
@@ -96,13 +103,61 @@ class ModModal(discord.ui.Modal):
           ephemeral=False,
       )
     elif self.action_type == "mute":
-      duration = datetime.timedelta(minutes=10)  # По умолчанию мут на 10 минут
+      duration = datetime.timedelta(minutes=self.mute_duration)
       await member.timeout(duration, reason=reason_text)
       await interaction.response.send_message(
           f"🔇 Администратор {interaction.user.mention} выдал мут **{member}** на"
-          f" 10 мин. Причина: `{reason_text}`",
+          f" {self.mute_duration} мин. Причина: `{reason_text}`",
           ephemeral=False,
       )
+
+
+class MuteSelect(discord.ui.Select):
+
+  def __init__(self):
+    options = [
+        discord.SelectOption(
+            label="5 минут", description="Быстрый мут на 5 минут", emoji="⏱️"
+        ),
+        discord.SelectOption(
+            label="15 минут", description="Мут на 15 минут", emoji="⏳"
+        ),
+        discord.SelectOption(
+            label="1 час", description="Мут на 1 час", emoji="⏰"
+        ),
+        discord.SelectOption(
+            label="1 день", description="Серьёзный мут на 24 часа", emoji="📅"
+        ),
+        discord.SelectOption(
+            label="1 неделя", description="Максимальный мут на 7 дней", emoji="🛑"
+        ),
+    ]
+    super().__init__(
+        placeholder="📌 Выберите время для мута...",
+        min_values=1,
+        max_values=1,
+        options=options,
+    )
+
+  async def callback(self, interaction: discord.Interaction):
+    mapping = {
+        "5 минут": 5,
+        "15 минут": 15,
+        "1 час": 60,
+        "1 день": 1440,
+        "1 неделя": 10080,
+    }
+    selected_time = mapping.get(self.values[0], 10)
+    await interaction.response.send_modal(
+        ModModal("mute", mute_duration=selected_time)
+    )
+
+
+class MuteView(discord.ui.View):
+
+  def __init__(self):
+    super().__init__(timeout=60)
+    self.add_item(MuteSelect())
 
 
 class AdminPanelView(discord.ui.View):
@@ -137,7 +192,7 @@ class AdminPanelView(discord.ui.View):
     await interaction.response.send_modal(ModModal("kick"))
 
   @discord.ui.button(
-      label="Мут (10 мин)", style=discord.ButtonStyle.primary, emoji="🔇"
+      label="Мут...", style=discord.ButtonStyle.primary, emoji="🔇"
   )
   async def mute_button(
       self, interaction: discord.Interaction, button: discord.ui.Button
@@ -147,7 +202,11 @@ class AdminPanelView(discord.ui.View):
           "❌ У вас нет прав на выдачу мутов!", ephemeral=True
       )
       return
-    await interaction.response.send_modal(ModModal("mute"))
+    await interaction.response.send_message(
+        "Выберите время для тайм-аута участника:",
+        view=MuteView(),
+        ephemeral=True,
+    )
 
 
 @bot.command(name="admin")
@@ -157,19 +216,17 @@ async def admin_panel(ctx):
       title="🛡️ Панель Администратора",
       description=(
           "Используйте кнопки ниже для быстрого применения наказаний к"
-          " нарушителям.\n\n*При нажатии откроется форма для ввода ID и"
-          " причины.*"
+          " нарушителям.\n\n*При нажатии на мут появится выбор времени.*"
       ),
       color=discord.Color.gold(),
   )
   embed.set_footer(text=f"Вызвана пользователем: {ctx.author.name}")
   await ctx.send(embed=embed, view=AdminPanelView())
 
+
 # ==========================================
 # КРАСИВОЕ МЕНЮ ПОМОЩИ (!help)
 # ==========================================
-
-bot.remove_command("help")
 
 
 @bot.command(name="help")
@@ -190,12 +247,14 @@ async def custom_help(ctx):
   )
 
   embed.add_field(
-      name="🛡️ Команды модерации (Админы / Модеры)",
+      name="🛡️ Команды модерации",
       value=(
-          "`!admin` — Открыть интерактивную админ-панель\n`!ban @участник"
-          " [причина]` — Заблокировать\n`!kick @участник [причина]` —"
-          " Изгнать\n`!mute @участник [минуты] [причина]` — Выдать тайм-аут\n`!unmute"
-          " @участник` — Снять мут\n`!clear_chat [кол-во]` — Очистить чат"
+          "`!admin` — Интерактивная панель (с выбором времени мута)\n`!ban"
+          " @участник [причина]` — Бан\n`!unban [ID]` — Разбан по ID\n`!kick"
+          " @участник [причина]` — Кик\n`!mute @участник [мин] [причина]` —"
+          " Мут\n`!unmute @участник` — Снять мут\n`!warn @участник [причина]` —"
+          " Варн\n`!clear_chat [кол-во]` — Очистить чат\n`!lock` / `!unlock` —"
+          " Закрыть/открыть канал\n`!say [текст]` — Сказать от лица бота"
       ),
       inline=False,
   )
@@ -203,8 +262,10 @@ async def custom_help(ctx):
   embed.add_field(
       name="👤 Общие команды (Для всех)",
       value=(
-          "`!ping` — Проверить задержку бота\n`!roll` — Бросить игральный кубик"
-          " (1-100)\n`!avatar [@участник]` — Посмотреть аватар"
+          "`!ping` — Задержка бота\n`!roll` — Кубик (1-100)\n`!coinflip` — Орёл"
+          " и решка\n`!avatar [@участник]` — Посмотреть аватарку\n`!userinfo"
+          " [@участник]` — Информация об участнике\n`!serverinfo` — Информация"
+          " о сервере"
       ),
       inline=False,
   )
@@ -430,7 +491,7 @@ async def setup_server(ctx):
 
 
 # ==========================================
-# КЛАССИЧЕСКИЕ КОМАНДЫ МОДЕРАЦИИ
+# РАСШИРЕННЫЕ КОМАНДЫ МОДЕРАЦИИ
 # ==========================================
 
 
@@ -442,6 +503,16 @@ async def ban_member(
   await member.ban(reason=reason)
   await ctx.send(
       f"🔨 Пользователь **{member.mention}** заблокирован. Причина: `{reason}`"
+  )
+
+
+@bot.command(name="unban")
+@commands.has_permissions(ban_members=True)
+async def unban_member(ctx, user_id: int):
+  user = await bot.fetch_user(user_id)
+  await ctx.guild.unban(user)
+  await ctx.send(
+      f"🔓 Пользователь **{user.name}** (ID: {user_id}) был разблокирован."
   )
 
 
@@ -477,6 +548,24 @@ async def unmute_member(ctx, member: discord.Member):
   await ctx.send(f"🔊 С пользователя **{member.mention}** снят мут.")
 
 
+@bot.command(name="warn")
+@commands.has_permissions(kick_members=True)
+async def warn_member(
+    ctx, member: discord.Member, *, reason: str = "Нарушение правил"
+):
+  await ctx.send(
+      f"⚠️ Пользователь **{member.mention}** получил предупреждение от"
+      f" {ctx.author.mention}. Причина: `{reason}`"
+  )
+  try:
+    await member.send(
+        f"⚠️ Вы получили предупреждение на сервере **{ctx.guild.name}**.\nПричина:"
+        f" `{reason}`"
+    )
+  except:
+    pass
+
+
 @bot.command(name="clear_chat")
 @commands.has_permissions(manage_messages=True)
 async def clear_messages(ctx, amount: int = 10):
@@ -486,8 +575,34 @@ async def clear_messages(ctx, amount: int = 10):
   await msg.delete()
 
 
+@bot.command(name="lock")
+@commands.has_permissions(manage_channels=True)
+async def lock_channel(ctx):
+  await ctx.channel.set_permissions(
+      ctx.guild.default_role, send_messages=False
+  )
+  await ctx.send(
+      "🔒 Канал успешно **заблокирован** (обычные участники больше не могут"
+      " писать)."
+  )
+
+
+@bot.command(name="unlock")
+@commands.has_permissions(manage_channels=True)
+async def unlock_channel(ctx):
+  await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
+  await ctx.send("🔓 Канал успешно **разблокирован**.")
+
+
+@bot.command(name="say")
+@commands.has_permissions(administrator=True)
+async def say_message(ctx, *, message: str):
+  await ctx.message.delete()
+  await ctx.send(message)
+
+
 # ==========================================
-# ОБЩИЕ КОМАНДЫ
+# НОВЫЕ КОМАНДЫ ДЛЯ УЧАСТНИКОВ
 # ==========================================
 
 
@@ -506,6 +621,14 @@ async def roll_dice(ctx):
   )
 
 
+@bot.command(name="coinflip")
+async def coinflip(ctx):
+  result = random.choice(["Орёл 🪙", "Решка 🪙"])
+  await ctx.send(
+      f"🪙 **{ctx.author.name}** подбросил монетку. Результат: **{result}**"
+  )
+
+
 @bot.command(name="avatar")
 async def get_avatar(ctx, member: discord.Member = None):
   if member is None:
@@ -514,6 +637,72 @@ async def get_avatar(ctx, member: discord.Member = None):
   embed.set_image(
       url=member.avatar.url if member.avatar else member.default_avatar.url
   )
+  await ctx.send(embed=embed)
+
+
+@bot.command(name="userinfo")
+async def user_info(ctx, member: discord.Member = None):
+  if member is None:
+    member = ctx.author
+
+  roles = [role.mention for role in member.roles[1:]]
+  roles_str = ", ".join(roles) if roles else "Нет ролей"
+
+  embed = discord.Embed(
+      title=f"Информация о пользователе — {member.name}",
+      color=member.color,
+      timestamp=datetime.datetime.now(),
+  )
+  embed.set_thumbnail(
+      url=member.avatar.url if member.avatar else member.default_avatar.url
+  )
+  embed.add_field(name="🆔 ID", value=member.id, inline=True)
+  embed.add_field(
+      name="🏷️ Никнейм", value=member.display_name, inline=True
+  )
+  embed.add_field(
+      name="📅 Аккаунт создан",
+      value=member.created_at.strftime("%d.%m.%Y"),
+      inline=False,
+  )
+  embed.add_field(
+      name="📥 Присоединился к серверу",
+      value=member.joined_at.strftime("%d.%m.%Y"),
+      inline=False,
+  )
+  embed.add_field(name=f"🛡️ Роли ({len(member.roles)-1})", value=roles_str, inline=False)
+
+  await ctx.send(embed=embed)
+
+
+@bot.command(name="serverinfo")
+async def server_info(ctx):
+  guild = ctx.guild
+  embed = discord.Embed(
+      title=f"📊 Информация о сервере: {guild.name}",
+      color=discord.Color.green(),
+      timestamp=datetime.datetime.now(),
+  )
+  if guild.icon:
+    embed.set_thumbnail(url=guild.icon.url)
+
+  embed.add_field(name="👑 Владелец", value=guild.owner.mention, inline=True)
+  embed.add_field(name="👥 Участники", value=guild.member_count, inline=True)
+  embed.add_field(
+      name="💬 Каналы",
+      value=(
+          f"Текстовых: {len(guild.text_channels)} | Голосовых:"
+          f" {len(guild.voice_channels)}"
+      ),
+      inline=False,
+  )
+  embed.add_field(name="🛡️ Ролей", value=len(guild.roles), inline=True)
+  embed.add_field(
+      name="📅 Дата создания",
+      value=guild.created_at.strftime("%d.%m.%Y"),
+      inline=True,
+  )
+
   await ctx.send(embed=embed)
 
 
