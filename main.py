@@ -160,11 +160,10 @@ async def admin_panel(ctx):
           " нарушителям.\n\n*При нажатии откроется форма для ввода ID и"
           " причины.*"
       ),
-      color=discord.EmbedColor.from_rgb ? discord.Color.gold() : 0xFFD700,
+      color=discord.Color.gold(),
   )
-  embed.set_footer(text=fВызвана пользователем: {ctx.author.name})
+  embed.set_footer(text=f"Вызвана пользователем: {ctx.author.name}")
   await ctx.send(embed=embed, view=AdminPanelView())
-
 
 # ==========================================
 # КРАСИВОЕ МЕНЮ ПОМОЩИ (!help)
