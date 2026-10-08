@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import os
 import random
 import discord
 from discord.ext import commands
@@ -79,13 +80,11 @@ class ModModal(discord.ui.Modal):
     except ValueError:
       await interaction.response.send_message(
           "❌ Неверный формат ID пользователя!", ephemeral=True
-        )
-        return
+      )
+      return
 
     reason_text = (
-        self.reason.value
-        if self.reason.value
-        else "Причина не указана"
+        self.reason.value if self.reason.value else "Причина не указана"
     )
 
     if self.action_type == "ban":
@@ -720,7 +719,5 @@ async def on_command_error(ctx, error):
         "❌ Вы забыли указать обязательный аргумент!", delete_after=5
     )
 
-
-import os
 
 bot.run(os.getenv("DISCORD_TOKEN"))
