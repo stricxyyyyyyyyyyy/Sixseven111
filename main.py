@@ -1,11 +1,13 @@
+import asyncio
+import datetime
+import random
 import discord
 from discord.ext import commands
 
-# Настройка интентов
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True
-intents.message_content = True  # Обязательно для работы команд
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -16,12 +18,9 @@ async def on_ready():
 
 
 # ==========================================
-# КОМАНДЫ ДЛЯ СОЗДАТЕЛЯ СЕРВЕРА
+# ПРОВЕРКА НА СОЗДАТЕЛЯ СЕРВЕРА
 # ==========================================
-
-
 def is_server_owner():
-  """Проверка, является ли пользователь создателем сервера"""
 
   async def predicate(ctx):
     if ctx.author != ctx.guild.owner:
@@ -33,6 +32,191 @@ def is_server_owner():
   return commands.check(predicate)
 
 
+# ==========================================
+# ИНТЕРАКТИВНАЯ АДМИН-ПАНЕЛЬ (МОДАЛКИ И КНОПКИ)
+# ==========================================
+
+
+class ModModal(discord.ui.Modal):
+
+  def __init__(self, action_type: str):
+    super().__init__(title=f"Управление: {action_type.upper()}")
+    self.action_type = action_type
+
+    self.target_id = discord.ui.TextInput(
+        label="ID или Упоминание (например: 12345678)",
+        placeholder="Введите ID пользователя...",
+        required=True,
+    )
+    self.reason = discord.ui.TextInput(
+        label="Причина",
+        placeholder="Укажите причину наказания...",
+        required=False,
+        style=discord.TextStyle.long,
+    )
+
+    self.add_item(self.target_id)
+    self.add_item(self.reason)
+
+  async def on_submit(self, interaction: discord.Interaction):
+    try:
+      member_id = int(
+          self.target_id.value.strip("<@!>")
+      )  # Очищаем от лишних символов упоминания
+      member = interaction.guild.get_member(member_id)
+      if not member:
+        await interaction.response.send_message(
+            "❌ Пользователь не найден на этом сервере!", ephemeral=True
+        )
+        return
+    except ValueError:
+      await interaction.response.send_message(
+          "❌ Неверный формат ID пользователя!", ephemeral=True
+      )
+      return
+
+    reason_text = (
+        self.reason.value
+        if self.reason.value
+        else "Причина не указана"
+    )
+
+    if self.action_type == "ban":
+      await member.ban(reason=reason_text)
+      await interaction.response.send_message(
+          f"🔨 Администратор {interaction.user.mention} заблокировал"
+          f" **{member}**. Причина: `{reason_text}`",
+          ephemeral=False,
+      )
+    elif self.action_type == "kick":
+      await member.kick(reason=reason_text)
+      await interaction.response.send_message(
+          f"👢 Администратор {interaction.user.mention} выгнал **{member}**."
+          f" Причина: `{reason_text}`",
+          ephemeral=False,
+      )
+    elif self.action_type == "mute":
+      duration = datetime.timedelta(minutes=10)  # По умолчанию мут на 10 минут
+      await member.timeout(duration, reason=reason_text)
+      await interaction.response.send_message(
+          f"🔇 Администратор {interaction.user.mention} выдал мут **{member}** на"
+          f" 10 мин. Причина: `{reason_text}`",
+          ephemeral=False,
+      )
+
+
+class AdminPanelView(discord.ui.View):
+
+  def __init__(self):
+    super().__init__(timeout=None)
+
+  @discord.ui.button(
+      label="Бан", style=discord.ButtonStyle.danger, emoji="🔨"
+  )
+  async def ban_button(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    if not interaction.user.guild_permissions.ban_members:
+      await interaction.response.send_message(
+          "❌ У вас нет прав на бан участников!", ephemeral=True
+      )
+      return
+    await interaction.response.send_modal(ModModal("ban"))
+
+  @discord.ui.button(
+      label="Кик", style=discord.ButtonStyle.secondary, emoji="👢"
+  )
+  async def kick_button(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    if not interaction.user.guild_permissions.kick_members:
+      await interaction.response.send_message(
+          "❌ У вас нет прав на кик участников!", ephemeral=True
+      )
+      return
+    await interaction.response.send_modal(ModModal("kick"))
+
+  @discord.ui.button(
+      label="Мут (10 мин)", style=discord.ButtonStyle.primary, emoji="🔇"
+  )
+  async def mute_button(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    if not interaction.user.guild_permissions.moderate_members:
+      await interaction.response.send_message(
+          "❌ У вас нет прав на выдачу мутов!", ephemeral=True
+      )
+      return
+    await interaction.response.send_modal(ModModal("mute"))
+
+
+@bot.command(name="admin")
+@commands.has_permissions(administrator=True)
+async def admin_panel(ctx):
+  embed = discord.Embed(
+      title="🛡️ Панель Администратора",
+      description=(
+          "Используйте кнопки ниже для быстрого применения наказаний к"
+          " нарушителям.\n\n*При нажатии откроется форма для ввода ID и"
+          " причины.*"
+      ),
+      color=discord.EmbedColor.from_rgb ? discord.Color.gold() : 0xFFD700,
+  )
+  embed.set_footer(text=fВызвана пользователем: {ctx.author.name})
+  await ctx.send(embed=embed, view=AdminPanelView())
+
+
+# ==========================================
+# КРАСИВОЕ МЕНЮ ПОМОЩИ (!help)
+# ==========================================
+
+
+@bot.command(name="help")
+async def custom_help(ctx):
+  embed = discord.Embed(
+      title="📜 Меню помощи и навигация по боту",
+      description="Ниже представлен список всех доступных команд:",
+      color=discord.Color.blue(),
+  )
+
+  embed.add_field(
+      name="👑 Команды создателя (Только Владелец)",
+      value=(
+          "`!setup` — Автоматическая настройка сервера\n`!clear` — Полная"
+          " очистка каналов и создание структуры"
+      ),
+      inline=False,
+  )
+
+  embed.add_field(
+      name="🛡️ Команды модерации (Админы / Модеры)",
+      value=(
+          "`!admin` — Открыть интерактивную админ-панель\n`!ban @участник"
+          " [причина]` — Заблокировать\n`!kick @участник [причина]` —"
+          " Изгнать\n`!mute @участник [минуты] [причина]` — Выдать тайм-аут\n`!unmute"
+          " @участник` — Снять мут\n`!clear_chat [кол-во]` — Очистить чат"
+      ),
+      inline=False,
+  )
+
+  embed.add_field(
+      name="👤 Общие команды (Для всех)",
+      value=(
+          "`!ping` — Проверить задержку бота\n`!roll` — Бросить игральный кубик"
+          " (1-100)\n`!avatar [@участник]` — Посмотреть аватар"
+      ),
+      inline=False,
+  )
+
+  embed.set_footer(text="Бот автоматизации сервера • Сделано с любовью")
+  await ctx.send(embed=embed)
+
+
+# ==========================================
+# КОМАНДЫ СОЗДАТЕЛЯ (SETUP / CLEAR)
+# ==========================================
+
+
 @bot.command(name="clear")
 @is_server_owner()
 async def clear_server(ctx):
@@ -42,14 +226,12 @@ async def clear_server(ctx):
       " категории..."
   )
 
-  # 1. Удаляем все каналы и категории на сервере
   for channel in guild.channels:
     try:
       await channel.delete()
     except Exception as e:
       print(f"Не удалось удалить канал {channel.name}: {e}")
 
-  # 2. Создаем роли (проверяем, чтобы не дублировать)
   roles_data = [
       {
           "name": "👑 ┃ Создатель",
@@ -137,7 +319,6 @@ async def clear_server(ctx):
     else:
       created_roles[r_info["name"]] = existing_role
 
-  # Права доступа
   everyone_role = guild.default_role
   overwrites_info = {
       everyone_role: discord.PermissionOverwrite(
@@ -148,7 +329,6 @@ async def clear_server(ctx):
       everyone_role: discord.PermissionOverwrite(read_messages=True)
   }
 
-  # --- КАТЕГОРИЯ: ИНФОРМАЦИЯ ---
   cat_info = await guild.create_category("📌 ┃ НАВИГАЦИЯ И ИНФО")
   await guild.create_text_channel(
       "📜・правила-чата", category=cat_info, overwrites=overwrites_info
@@ -166,7 +346,6 @@ async def clear_server(ctx):
       "🔗・полезные-ссылки", category=cat_info, overwrites=overwrites_info
   )
 
-  # --- КАТЕГОРИЯ: ОБЩЕНИЕ ---
   cat_chat = await guild.create_category("💬 ┃ КОМЬЮНИТИ")
   await guild.create_text_channel(
       "💬・общий-чат", category=cat_chat, overwrites=overwrites_general
@@ -184,7 +363,6 @@ async def clear_server(ctx):
       "🔮・мемы-и-арты", category=cat_chat, overwrites=overwrites_general
   )
 
-  # --- КАТЕГОРИЯ: ИГРЫ И МУЗЫКА ---
   cat_games = await guild.create_category("🎮 ┃ ИГРЫ И РАЗВЛЕЧЕНИЯ")
   await guild.create_text_channel(
       "🎮・игровой-чат", category=cat_games, overwrites=overwrites_general
@@ -196,7 +374,6 @@ async def clear_server(ctx):
       "🎲・аркады-и-игры", category=cat_games, overwrites=overwrites_general
   )
 
-  # --- КАТЕГОРИЯ: ГОЛОСОВЫЕ КАНАЛЫ ---
   cat_voice = await guild.create_category("🔊 ┃ ГОЛОСОВЫЕ КОМНАТЫ")
   await guild.create_voice_channel("🔊 ┃ Главный Лобби", category=cat_voice)
   await guild.create_voice_channel("🎮 ┃ Дуо / Трио (1)", category=cat_voice)
@@ -206,7 +383,6 @@ async def clear_server(ctx):
   await guild.create_voice_channel("🌙 ┃ Уединение", category=cat_voice)
   await guild.create_voice_channel("💤 ┃ AFK Зона", category=cat_voice)
 
-  # --- КАТЕГОРИЯ: АДМИНИСТРАЦИЯ (СКРЫТАЯ) ---
   overwrites_admin = {
       everyone_role: discord.PermissionOverwrite(read_messages=False),
       created_roles["👑 ┃ Создатель"]: discord.PermissionOverwrite(
@@ -253,7 +429,7 @@ async def setup_server(ctx):
 
 
 # ==========================================
-# КОМАНДЫ МОДЕРАЦИИ (Только для модераторов/админов)
+# КЛАССИЧЕСКИЕ КОМАНДЫ МОДЕРАЦИИ
 # ==========================================
 
 
@@ -285,8 +461,6 @@ async def kick_member(
 async def mute_member(
     ctx, member: discord.Member, minutes: int, *, reason: str = "Без причины"
 ):
-  import datetime
-
   duration = datetime.timedelta(minutes=minutes)
   await member.timeout(duration, reason=reason)
   await ctx.send(
@@ -307,14 +481,12 @@ async def unmute_member(ctx, member: discord.Member):
 async def clear_messages(ctx, amount: int = 10):
   await ctx.channel.purge(limit=amount + 1)
   msg = await ctx.send(f"🧹 Удалено сообщений: {amount}")
-  import asyncio
-
   await asyncio.sleep(3)
   await msg.delete()
 
 
 # ==========================================
-# КОМАНДЫ ДЛЯ ОБЫЧНЫХ УЧАСТНИКОВ
+# ОБЩИЕ КОМАНДЫ
 # ==========================================
 
 
@@ -326,8 +498,6 @@ async def ping(ctx):
 
 @bot.command(name="roll")
 async def roll_dice(ctx):
-  import random
-
   result = random.randint(1, 100)
   await ctx.send(
       f"🎲 **{ctx.author.name}** бросил кубик и выпало число: **{result}** (из"
@@ -340,11 +510,13 @@ async def get_avatar(ctx, member: discord.Member = None):
   if member is None:
     member = ctx.author
   embed = discord.Embed(title=f"Аватар пользователя {member.name}")
-  embed.set_image(url=member.avatar.url if member.avatar else member.default_avatar.url)
+  embed.set_image(
+      url=member.avatar.url if member.avatar else member.default_avatar.url
+  )
   await ctx.send(embed=embed)
 
 
-# Обработка ошибок прав доступа
+# Обработка ошибок
 @bot.event
 async def on_command_error(ctx, error):
   if isinstance(
@@ -355,8 +527,7 @@ async def on_command_error(ctx, error):
     )
   elif isinstance(error, commands.MissingRequiredArgument):
     await ctx.send(
-        "❌ Вы забыли указать обязательный аргумент (например, пользователя)!",
-        delete_after=5,
+        "❌ Вы забыли указать обязательный аргумент!", delete_after=5
     )
 
 
