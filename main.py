@@ -169,6 +169,8 @@ async def admin_panel(ctx):
 # КРАСИВОЕ МЕНЮ ПОМОЩИ (!help)
 # ==========================================
 
+bot.remove_command("help")
+
 
 @bot.command(name="help")
 async def custom_help(ctx):
