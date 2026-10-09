@@ -15,6 +15,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Удаляем стандартную команду help, чтобы не было конфликтов
 bot.remove_command("help")
 
+# Простая база данных в памяти (для варнов и баланса)
+USER_WARNINGS = {}  # {user_id: [причины варнов]}
+USER_ECONOMY = {}  # {user_id: баланс монет}
+
 
 @bot.event
 async def on_ready():
@@ -224,52 +228,54 @@ async def admin_panel(ctx):
 
 
 # ==========================================
-# КРАСИВОЕ МЕНЮ ПОМОЩИ (!help)
+# РАСШИРЕННОЕ МЕНЮ ПОМОЩИ (!help)
 # ==========================================
 
 
 @bot.command(name="help")
 async def custom_help(ctx):
   embed = discord.Embed(
-      title="📜 Меню помощи и навигация по боту",
-      description="Ниже представлен список всех доступных команд:",
+      title="📜 Меню помощи (Juniper-Style)",
+      description="Список всех доступных категорий и команд бота:",
       color=discord.Color.blue(),
   )
 
   embed.add_field(
-      name="👑 Команды создателя (Только Владелец)",
+      name="👑 Команды создателя",
       value=(
-          "`!setup` — Автоматическая настройка сервера\n`!clear` — Полная"
-          " очистка каналов и создание структуры"
+          "`!setup` — Настроить каналы и роли\n`!clear` — Полный сброс и очистка"
+          " сервера"
       ),
       inline=False,
   )
 
   embed.add_field(
-      name="🛡️ Команды модерации",
+      name="🛡️ Модерация и администрирование",
       value=(
-          "`!admin` — Интерактивная панель (с выбором времени мута)\n`!ban"
-          " @участник [причина]` — Бан\n`!unban [ID]` — Разбан по ID\n`!kick"
-          " @участник [причина]` — Кик\n`!mute @участник [мин] [причина]` —"
-          " Мут\n`!unmute @участник` — Снять мут\n`!warn @участник [причина]` —"
-          " Варн\n`!clear_chat [кол-во]` — Очистить чат\n`!lock` / `!unlock` —"
-          " Закрыть/открыть канал\n`!say [текст]` — Сказать от лица бота"
+          "`!admin` — Интерактивная панель\n`!ban / !unban` — Блокировка /"
+          " Разбан\n`!kick` — Кик с сервера\n`!mute / !unmute` — Выдача / снятие"
+          " мута\n`!warn / !warnings` — Варны / история варнов\n`!clear_warnings`"
+          " — Сброс варнов\n`!clear_chat [кол-во]` — Очистка сообщений\n`!lock"
+          " / !unlock` — Заморозка / разморозка канала\n`!slowmode [сек]` —"
+          " Медленный режим\n`!say_embed [заголовок] | [текст]` — Красивое"
+          " объявление"
       ),
       inline=False,
   )
 
   embed.add_field(
-      name="👤 Общие команды (Для всех)",
+      name="🎉 Экономика и Участники",
       value=(
-          "`!ping` — Задержка бота\n`!roll` — Кубик (1-100)\n`!coinflip` — Орёл"
-          " и решка\n`!avatar [@участник]` — Посмотреть аватарку\n`!userinfo"
-          " [@участник]` — Информация об участнике\n`!serverinfo` — Информация"
-          " о сервере"
+          "`!balance` — Проверить баланс монет\n`!daily` — Ежедневный бонус"
+          " 🪙\n`!work` — Пойти на работу 💼\n`!slot [ставка]` — Сыграть в слоты"
+          " 🎰\n`!poll [вопрос]` — Создать голосование 📊\n`!ping` — Задержка"
+          " бота\n`!roll` — Бросить кубик\n`!coinflip` — Орёл или решка\n`!avatar"
+          " [@юзер]` — Аватар\n`!userinfo / !serverinfo` — Информация"
       ),
       inline=False,
   )
 
-  embed.set_footer(text="Бот автоматизации сервера • Сделано с любовью")
+  embed.set_footer(text="Discord Bot • Все права защищены")
   await ctx.send(embed=embed)
 
 
@@ -490,7 +496,7 @@ async def setup_server(ctx):
 
 
 # ==========================================
-# РАСШИРЕННЫЕ КОМАНДЫ МОДЕРАЦИИ
+# ПРОДВИНУТЫЕ КОМАНДЫ МОДЕРАЦИИ
 # ==========================================
 
 
@@ -552,17 +558,42 @@ async def unmute_member(ctx, member: discord.Member):
 async def warn_member(
     ctx, member: discord.Member, *, reason: str = "Нарушение правил"
 ):
+  if member.id not in USER_WARNINGS:
+    USER_WARNINGS[member.id] = []
+  USER_WARNINGS[member.id].append(reason)
+
   await ctx.send(
-      f"⚠️ Пользователь **{member.mention}** получил предупреждение от"
-      f" {ctx.author.mention}. Причина: `{reason}`"
+      f"⚠️ Пользователь **{member.mention}** получил варн от"
+      f" {ctx.author.mention}. Причина: `{reason}` (Всего варнов:"
+      f" {len(USER_WARNINGS[member.id])})"
   )
-  try:
-    await member.send(
-        f"⚠️ Вы получили предупреждение на сервере **{ctx.guild.name}**.\nПричина:"
-        f" `{reason}`"
-    )
-  except:
-    pass
+
+
+@bot.command(name="warnings")
+@commands.has_permissions(kick_members=True)
+async def show_warnings(ctx, member: discord.Member):
+  warns = USER_WARNINGS.get(member.id, [])
+  if not warns:
+    await ctx.send(f"✨ У пользователя **{member.name}** нет предупреждений.")
+    return
+
+  warns_list = "\n".join(
+      [f"{i+1}. {r}" for i, r in enumerate(warns)]
+  )
+  embed = discord.Embed(
+      title=f"⚠️ Варны пользователя {member.name}",
+      description=warns_list,
+      color=discord.Color.orange(),
+  )
+  await ctx.send(embed=embed)
+
+
+@bot.command(name="clear_warnings")
+@commands.has_permissions(administrator=True)
+async def clear_warnings(ctx, member: discord.Member):
+  if member.id in USER_WARNINGS:
+    USER_WARNINGS[member.id] = []
+  await ctx.send(f"🧹 Все предупреждения пользователя **{member.mention}** сброшены.")
 
 
 @bot.command(name="clear_chat")
@@ -580,28 +611,142 @@ async def lock_channel(ctx):
   await ctx.channel.set_permissions(
       ctx.guild.default_role, send_messages=False
   )
-  await ctx.send(
-      "🔒 Канал успешно **заблокирован** (обычные участники больше не могут"
-      " писать)."
-  )
+  await ctx.send("🔒 Канал заблокирован для участников.")
 
 
 @bot.command(name="unlock")
 @commands.has_permissions(manage_channels=True)
 async def unlock_channel(ctx):
   await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
-  await ctx.send("🔓 Канал успешно **разблокирован**.")
+  await ctx.send("🔓 Канал разблокирован.")
 
 
-@bot.command(name="say")
+@bot.command(name="slowmode")
+@commands.has_permissions(manage_channels=True)
+async def slowmode(ctx, seconds: int):
+  await ctx.channel.edit(slowmode_delay=seconds)
+  if seconds == 0:
+    await ctx.send("⏱️ Медленный режим в канале отключен.")
+  else:
+    await ctx.send(
+        f"⏱️ Медленный режим установлен на **{seconds}** секунд для каждого"
+        " сообщения."
+    )
+
+
+@bot.command(name="say_embed")
 @commands.has_permissions(administrator=True)
-async def say_message(ctx, *, message: str):
+async def say_embed(ctx, *, text: str):
   await ctx.message.delete()
-  await ctx.send(message)
+  if "|" in text:
+    title, desc = text.split("|", 1)
+    embed = discord.Embed(
+        title=title.strip(), description=desc.strip(), color=discord.Color.blurple()
+    )
+  else:
+    embed = discord.Embed(
+        description=text.strip(), color=discord.Color.blurple()
+    )
+  await ctx.send(embed=embed)
 
 
 # ==========================================
-# НОВЫЕ КОМАНДЫ ДЛЯ УЧАСТНИКОВ
+# ИГРОВЫЕ И ЭКОНОМИЧЕСКИЕ КОМАНДЫ (JUNIPER-STYLE)
+# ==========================================
+
+
+@bot.command(name="balance", aliases=["bal", "money"])
+async def balance(ctx, member: discord.Member = None):
+  if member is None:
+    member = ctx.author
+  bal = USER_ECONOMY.get(member.id, 0)
+  await ctx.send(
+      f"💰 Баланс пользователя **{member.display_name}**: **{bal}** 🪙"
+  )
+
+
+@bot.command(name="daily")
+async def daily_bonus(ctx):
+  user_id = ctx.author.id
+  current_bal = USER_ECONOMY.get(user_id, 0)
+  USER_ECONOMY[user_id] = current_bal + 500
+  await ctx.send(
+      f"🎁 {ctx.author.mention}, вы успешно забрали ежедневную награду — **500**"
+      " 🪙!"
+  )
+
+
+@bot.command(name="work")
+async def work(ctx):
+  user_id = ctx.author.id
+  earned = random.randint(50, 250)
+  current_bal = USER_ECONOMY.get(user_id, 0)
+  USER_ECONOMY[user_id] = current_bal + earned
+
+  works = [
+      f"Вы поработали программистом и заработали **{earned}** 🪙",
+      f"Вы раздавали листовки у метро и получили **{earned}** 🪙",
+      f"Вы помогли настроить сервер и заработали **{earned}** 🪙",
+      f"Вы постригли газон соседу и получили **{earned}** 🪙",
+  ]
+  await ctx.send(f"💼 {ctx.author.mention}, {random.choice(works)}")
+
+
+@bot.command(name="slot")
+async def slot_machine(ctx, bet: int = 10):
+  user_id = ctx.author.id
+  bal = USER_ECONOMY.get(user_id, 0)
+
+  if bet <= 0:
+    await ctx.send("❌ Ставка должна быть больше 0!")
+    return
+  if bal < bet:
+    await ctx.send("❌ У вас недостаточно монет для такой ставки!")
+    return
+
+  emojis = ["🍒", "🍋", "🔔", "⭐", "💎"]
+  res1 = random.choice(emojis)
+  res2 = random.choice(emojis)
+  res3 = random.choice(emojis)
+
+  if res1 == res2 == res3:
+    win = bet * 5
+    USER_ECONOMY[user_id] = bal + win
+    await ctx.send(
+        f"🎰 | {res1} | {res2} | {res3} |\n🎉 ДЖЕКПОТ! Вы выиграли **{win}** 🪙!"
+    )
+  elif res1 == res2 or res2 == res3 or res1 == res3:
+    win = bet * 2
+    USER_ECONOMY[user_id] = bal + win
+    await ctx.send(
+        f"🎰 | {res1} | {res2} | {res3} |\n✨ Неплохо! Два совпадения,"
+        f" выигрыш: **{win}** 🪙!"
+    )
+  else:
+    USER_ECONOMY[user_id] = bal - bet
+    await ctx.send(
+        f"🎰 | {res1} | {res2} | {res3} |\n😢 К сожалению, вы проиграли"
+        f" **{bet}** 🪙."
+    )
+
+
+@bot.command(name="poll")
+@commands.has_permissions(manage_messages=True)
+async def create_poll(ctx, *, question: str):
+  await ctx.message.delete()
+  embed = discord.Embed(
+      title="📊 Голосование",
+      description=question,
+      color=discord.Color.purple(),
+  )
+  embed.set_footer(text=f"Автор опроса: {ctx.author.name}")
+  poll_msg = await ctx.send(embed=embed)
+  await poll_msg.add_reaction("👍")
+  await poll_msg.add_reaction("👎")
+
+
+# ==========================================
+# ОБЩИЕ КОМАНДЫ ДЛЯ УЧАСТНИКОВ
 # ==========================================
 
 
@@ -669,7 +814,9 @@ async def user_info(ctx, member: discord.Member = None):
       value=member.joined_at.strftime("%d.%m.%Y"),
       inline=False,
   )
-  embed.add_field(name=f"🛡️ Роли ({len(member.roles)-1})", value=roles_str, inline=False)
+  embed.add_field(
+      name=f"🛡️ Роли ({len(member.roles)-1})", value=roles_str, inline=False
+  )
 
   await ctx.send(embed=embed)
 
