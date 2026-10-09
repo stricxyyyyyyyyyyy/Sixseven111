@@ -257,7 +257,6 @@ async def on_voice_state_update(
     before: discord.VoiceState,
     after: discord.VoiceState,
 ):
-  # Создание комнаты при входе в триггер
   if after.channel and after.channel.name == "➕ ┃ Создать комнатку":
     category = after.channel.category
     new_channel = await member.guild.create_voice_channel(
@@ -278,7 +277,6 @@ async def on_voice_state_update(
     except:
       pass
 
-  # Удаление пустой комнаты
   if before.channel and before.channel.id in VOICE_OWNERS:
     if len(before.channel.members) == 0:
       del VOICE_OWNERS[before.channel.id]
@@ -456,13 +454,15 @@ class SelfRolesView(discord.ui.View):
 async def roles_panel(ctx):
   await ctx.message.delete()
   embed = discord.Embed(
-      title="🎭 Выбор Ролей", description="Нажмите кнопку, чтобы получить роль.", color=discord.Color.gold()
+      title="🎭 Выбор Ролей",
+      description="Нажмите кнопку, чтобы получить роль.",
+      color=discord.Color.gold(),
   )
   await ctx.send(embed=embed, view=SelfRolesView())
 
 
 # ==========================================
-# 4. АДМИН-ПАНЕЛЬ И МОДЕРАЦИЯ
+# 4. АДМИН-ПАНЕЛЬ И МОДЕРАЦИЯ С ВЫБОРОМ МУТА
 # ==========================================
 
 
@@ -481,7 +481,12 @@ def is_server_owner():
 class ModModal(discord.ui.Modal):
 
   def __init__(self, action_type: str, mute_duration: int = 10):
-    super().__init__(title=f"Модерация: {action_type.upper()}")
+    title_map = {
+        "ban": "Бан участника",
+        "kick": "Кик участника",
+        "mute": f"Мут на {mute_duration} мин.",
+    }
+    super().__init__(title=title_map.get(action_type, "Модерация"))
     self.action_type = action_type
     self.mute_duration = mute_duration
     self.target_id = discord.ui.TextInput(
@@ -523,8 +528,37 @@ class ModModal(discord.ui.Modal):
           datetime.timedelta(minutes=self.mute_duration), reason=reason
       )
       await interaction.response.send_message(
-          f"🔇 Мут **{member}** на {self.mute_duration} мин."
+          f"🔇 Мут **{member}** на {self.mute_duration} мин. Причина:"
+          f" `{reason}`"
       )
+
+
+class MuteSelect(discord.ui.Select):
+
+  def __init__(self):
+    options = [
+        discord.SelectOption(label="5 минут", value="5", emoji="⏱️"),
+        discord.SelectOption(label="15 минут", value="15", emoji="⏳"),
+        discord.SelectOption(label="1 час", value="60", emoji="⏰"),
+        discord.SelectOption(label="1 день", value="1440", emoji="📅"),
+        discord.SelectOption(label="1 неделя", value="10080", emoji="🛑"),
+    ]
+    super().__init__(
+        placeholder="📌 Выберите время мута...", options=options
+    )
+
+  async def callback(self, interaction: discord.Interaction):
+    duration = int(self.values[0])
+    await interaction.response.send_modal(
+        ModModal("mute", mute_duration=duration)
+    )
+
+
+class MuteView(discord.ui.View):
+
+  def __init__(self):
+    super().__init__(timeout=60)
+    self.add_item(MuteSelect())
 
 
 class AdminPanelView(discord.ui.View):
@@ -545,10 +579,12 @@ class AdminPanelView(discord.ui.View):
     await interaction.response.send_modal(ModModal("kick"))
 
   @discord.ui.button(
-      label="Мут (10м)", style=discord.ButtonStyle.primary, emoji="🔇"
+      label="Мут...", style=discord.ButtonStyle.primary, emoji="🔇"
   )
   async def m(self, interaction: discord.Interaction, button: discord.ui.Button):
-    await interaction.response.send_modal(ModModal("mute", 10))
+    await interaction.response.send_message(
+        "Выберите время для мута:", view=MuteView(), ephemeral=True
+    )
 
 
 @bot.command(name="admin")
@@ -578,7 +614,6 @@ async def clear_server(ctx):
     except Exception:
       pass
 
-  # Создание ролей
   roles_data = [
       {
           "name": "👑 ┃ Создатель",
@@ -628,7 +663,6 @@ async def clear_server(ctx):
           hoist=r["hoist"],
       )
 
-  # Создание каналов
   cat_info = await guild.create_category("📌 ┃ НАВИГАЦИЯ И ИНФО")
   await guild.create_text_channel(
       "📜・правила-чата",
@@ -660,9 +694,7 @@ async def clear_server(ctx):
 
   cat_voice = await guild.create_category("🔊 ┃ ПРИВАТНЫЕ КОМНАТЫ")
   await guild.create_voice_channel("🔊 ┃ Главный Лобби", category=cat_voice)
-  await guild.create_voice_channel(
-      "➕ ┃ Создать комнатку", category=cat_voice
-  )  # Триггер войсов
+  await guild.create_voice_channel("➕ ┃ Создать комнатку", category=cat_voice)
 
   await news.send("✅ **Сервер полностью очищен и настроен заново!**")
 
@@ -674,7 +706,7 @@ async def setup_server(ctx):
 
 
 # ==========================================
-# 6. ЭКОНОМИКА, ИГРЫ И ОБЩИЕ КОМАНДЫ
+# 6. ЭКОНОМИКА С КУЛДАУНАМИ И РАЗВЛЕЧЕНИЯ
 # ==========================================
 
 
@@ -686,20 +718,45 @@ async def balance(ctx, member: discord.Member = None):
 
 
 @bot.command(name="daily")
+@commands.cooldown(1, 86400, commands.BucketType.user)
 async def daily(ctx):
   uid = ctx.author.id
   USER_ECONOMY[uid] = USER_ECONOMY.get(uid, 0) + 500
   await ctx.send(f"🎁 {ctx.author.mention}, вы получили ежедневный бонус **500** 🪙!")
 
 
+@daily.error
+async def daily_error(ctx, error):
+  if isinstance(error, commands.CommandOnCooldown):
+    hours = round(error.retry_after / 3600, 1)
+    await ctx.send(
+        f"⏳ {ctx.author.mention}, вы уже получали бонус сегодня! Попробуйте через"
+        f" **{hours}** ч.",
+        delete_after=10,
+    )
+
+
 @bot.command(name="work")
+@commands.cooldown(1, 3600, commands.BucketType.user)
 async def work(ctx):
   uid = ctx.author.id
   earned = random.randint(50, 250)
   USER_ECONOMY[uid] = USER_ECONOMY.get(uid, 0) + earned
   await ctx.send(
-      f"💼 {ctx.author.mention}, вы поработали и заработали **{earned}** 🪙!"
+      f"💼 {ctx.author.mention}, вы успешно поработали и заработали"
+      f" **{earned}** 🪙!"
   )
+
+
+@work.error
+async def work_error(ctx, error):
+  if isinstance(error, commands.CommandOnCooldown):
+    minutes = round(error.retry_after / 60)
+    await ctx.send(
+        f"⏳ {ctx.author.mention}, вы устали! Следующая смена будет доступна"
+        f" через **{minutes}** мин.",
+        delete_after=10,
+    )
 
 
 @bot.command(name="slot")
@@ -758,16 +815,17 @@ async def custom_help(ctx):
   embed.add_field(
       name="🛡️ Администрирование",
       value=(
-          "`!admin` — Админ-панель\n`!ticket_panel` — Создать панель тикетов\n`!roles_panel`"
-          " — Панель авто-ролей\n`!ban` / `!kick` / `!mute` — Наказания"
+          "`!admin` — Админ-панель (с выбором времени мута)\n`!ticket_panel` —"
+          " Панель тикетов\n`!roles_panel` — Авто-роли\n`!ban` / `!kick` / `!mute`"
+          " — Наказания"
       ),
       inline=False,
   )
   embed.add_field(
       name="🎉 Экономика и Развлечения",
       value=(
-          "`!balance` / `!daily` / `!work` / `!slot` — Экономика\n`!ping` —"
-          " Пинг"
+          "`!balance` / `!daily` (1 раз в день) / `!work` (1 раз в час) /"
+          " `!slot` — Экономика\n`!ping` — Пинг"
       ),
       inline=False,
   )
