@@ -13,9 +13,17 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.remove_command("help")
 
-USER_WARNINGS = {}
-USER_ECONOMY = {}
-VOICE_OWNERS = {}  # {channel_id: owner_id} для приватных войсов
+# Базы данных в памяти
+USER_WARNINGS = {}  # {user_id: [причины]}
+USER_ECONOMY = {}  # {user_id: баланс}
+USER_XP = {}  # {user_id: [xp, level]}
+VOICE_OWNERS = {}  # {channel_id: owner_id}
+
+# Магазин ролей: {item_id: {"name": "Название роли", "price": цена}}
+ROLE_SHOP = {
+    1: {"name": "⭐ ┃ VIP Участник", "price": 1000},
+    2: {"name": "🎉 ┃ Ивентер", "price": 2500},
+}
 
 
 @bot.event
@@ -24,31 +32,74 @@ async def on_ready():
 
 
 # ==========================================
-# 1. АВТО-ПРИВЕТСТВИЕ И АВТО-РОЛЬ
+# 1. СИСТЕМА УРОВНЕЙ И ЛОГИРОВАНИЕ
 # ==========================================
+@bot.event
+async def on_message(message: discord.Message):
+  if message.author.bot or not message.guild:
+    return
+
+  uid = message.author.id
+  if uid not in USER_XP:
+    USER_XP[uid] = [0, 1]
+
+  xp_gain = random.randint(15, 25)
+  USER_XP[uid][0] += xp_gain
+
+  needed_xp = USER_XP[uid][1] * 100
+  if USER_XP[uid][0] >= needed_xp:
+    USER_XP[uid][0] -= needed_xp
+    USER_XP[uid][1] += 1
+    new_lvl = USER_XP[uid][1]
+    await message.channel.send(
+        f"🎉 Поздравляем, {message.author.mention}! Вы повысили свой уровень до"
+        f" **{new_lvl}**!"
+    )
+
+  await bot.process_commands(message)
+
+
 @bot.event
 async def on_member_join(member: discord.Member):
   role = discord.utils.get(member.guild.roles, name="👤 ┃ Участник")
   if role:
     try:
       await member.add_roles(role)
-    except Exception as e:
-      print(f"Не удалось выдать авто-роль: {e}")
+    except:
+      pass
 
   channel = discord.utils.get(member.guild.text_channels, name="💬・общий-чат")
   if channel:
     embed = discord.Embed(
         title="👋 Добро пожаловать!",
-        description=(
-            f"Приветствуем тебя на сервере, {member.mention}!\n"
-            "Не забудь ознакомиться с правилами в канале <#📜・правила-чата>."
-        ),
+        description=f"Приветствуем тебя на сервере, {member.mention}!",
         color=discord.Color.green(),
     )
     embed.set_thumbnail(
         url=member.avatar.url if member.avatar else member.default_avatar.url
     )
     await channel.send(embed=embed)
+
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+  if message.author.bot or not message.guild:
+    return
+  log_channel = discord.utils.get(
+      message.guild.text_channels, name="🛠️・логи-сервера"
+  )
+  if log_channel:
+    embed = discord.Embed(
+        title="🗑️ Удаленное сообщение",
+        description=(
+            f"**Автор:** {message.author.mention}\n**Канал:**"
+            f" {message.channel.mention}\n**Текст:**"
+            f" `{message.content or 'Медиа-файл / Эмбед'}`"
+        ),
+        color=discord.Color.red(),
+        timestamp=datetime.datetime.now(),
+    )
+    await log_channel.send(embed=embed)
 
 
 # ==========================================
@@ -62,31 +113,24 @@ class RenameVoiceModal(discord.ui.Modal):
     super().__init__(title="Смена названия комнаты")
     self.voice_channel = voice_channel
     self.new_name = discord.ui.TextInput(
-        label="Новое название канала",
-        placeholder="Введите название...",
-        max_length=100,
-        required=True,
+        label="Новое название канала", max_length=100, required=True
     )
     self.add_item(self.new_name)
 
   async def on_submit(self, interaction: discord.Interaction):
     await self.voice_channel.edit(name=self.new_name.value)
     await interaction.response.send_message(
-        f"✅ Название комнаты изменено на: **{self.new_name.value}**",
-        ephemeral=True,
+        f"✅ Название изменено на: **{self.new_name.value}**", ephemeral=True
     )
 
 
 class LimitVoiceModal(discord.ui.Modal):
 
   def __init__(self, voice_channel: discord.VoiceChannel):
-    super().__init__(title="Установка лимита участников")
+    super().__init__(title="Лимит участников")
     self.voice_channel = voice_channel
     self.limit = discord.ui.TextInput(
-        label="Лимит человек (0 = без лимита)",
-        placeholder="Например: 5",
-        max_length=2,
-        required=True,
+        label="Лимит (0 - 99)", max_length=2, required=True
     )
     self.add_item(self.limit)
 
@@ -96,59 +140,11 @@ class LimitVoiceModal(discord.ui.Modal):
       if 0 <= val <= 99:
         await self.voice_channel.edit(user_limit=val)
         await interaction.response.send_message(
-            f"👥 Лимит участников установлен на: **{val}**", ephemeral=True
+            f"👥 Лимит установлен на: **{val}**", ephemeral=True
         )
-      else:
-        await interaction.response.send_message(
-            "❌ Лимит должен быть от 0 до 99!", ephemeral=True
-        )
-    except ValueError:
+    except:
       await interaction.response.send_message(
-          "❌ Введите корректное число!", ephemeral=True
-      )
-
-
-class AccessVoiceModal(discord.ui.Modal):
-
-  def __init__(
-      self, voice_channel: discord.VoiceChannel, allow_access: bool = True
-  ):
-    action_str = "разрешить" if allow_access else "запретить"
-    super().__init__(title=f"Кому {action_str} доступ")
-    self.voice_channel = voice_channel
-    self.allow_access = allow_access
-    self.target_input = discord.ui.TextInput(
-        label="ID пользователя или Упоминание",
-        placeholder="Например: 123456789...",
-        required=True,
-    )
-    self.add_item(self.target_input)
-
-  async def on_submit(self, interaction: discord.Interaction):
-    try:
-      user_id = int(self.target_input.value.strip("<@!>"))
-      member = interaction.guild.get_member(user_id)
-      if not member:
-        await interaction.response.send_message(
-            "❌ Участник не найден!", ephemeral=True
-        )
-        return
-
-      if self.allow_access:
-        await self.voice_channel.set_permissions(member, connect=True)
-        await interaction.response.send_message(
-            f"✅ Доступ для {member.mention} **разрешен**!", ephemeral=True
-        )
-      else:
-        await self.voice_channel.set_permissions(member, connect=False)
-        if member in self.voice_channel.members:
-          await member.move_to(None)
-        await interaction.response.send_message(
-            f"🚫 Доступ для {member.mention} **заблокирован**!", ephemeral=True
-        )
-    except ValueError:
-      await interaction.response.send_message(
-          "❌ Введите корректный ID!", ephemeral=True
+          "❌ Ошибка ввода числа!", ephemeral=True
       )
 
 
@@ -165,7 +161,7 @@ class VoiceControlView(discord.ui.View):
         and not interaction.user.guild_permissions.administrator
     ):
       await interaction.response.send_message(
-          "❌ Вы не являетесь владельцем этой комнаты!", ephemeral=True
+          "❌ Вы не владелец комнаты!", ephemeral=True
       )
       return False
     return True
@@ -197,58 +193,15 @@ class VoiceControlView(discord.ui.View):
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
     everyone = interaction.guild.default_role
-    current_perm = self.voice_channel.overwrites_for(everyone).connect
-    if current_perm is False:
+    current = self.voice_channel.overwrites_for(everyone).connect
+    if current is False:
       await self.voice_channel.set_permissions(everyone, connect=None)
-      await interaction.response.send_message(
-          "🔓 Комната открыта для всех!", ephemeral=True
-      )
+      await interaction.response.send_message("🔓 Комната открыта!", ephemeral=True)
     else:
       await self.voice_channel.set_permissions(everyone, connect=False)
       await interaction.response.send_message(
-          "🔒 Комната закрыта от посторонних!", ephemeral=True
+          "🔒 Комната закрыта!", ephemeral=True
       )
-
-  @discord.ui.button(
-      label="Скрыть / Показать",
-      style=discord.ButtonStyle.secondary,
-      emoji="👁️",
-  )
-  async def hide_btn(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    everyone = interaction.guild.default_role
-    current_perm = self.voice_channel.overwrites_for(everyone).read_messages
-    if current_perm is False:
-      await self.voice_channel.set_permissions(everyone, read_messages=None)
-      await interaction.response.send_message(
-          "👁️ Комната теперь видима всем!", ephemeral=True
-      )
-    else:
-      await self.voice_channel.set_permissions(everyone, read_messages=False)
-      await interaction.response.send_message(
-          "🙈 Комната скрыта от остальных!", ephemeral=True
-      )
-
-  @discord.ui.button(
-      label="Разрешить", style=discord.ButtonStyle.success, emoji="➕"
-  )
-  async def allow_btn(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    await interaction.response.send_modal(
-        AccessVoiceModal(self.voice_channel, allow_access=True)
-    )
-
-  @discord.ui.button(
-      label="Запретить", style=discord.ButtonStyle.danger, emoji="➖"
-  )
-  async def deny_btn(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    await interaction.response.send_modal(
-        AccessVoiceModal(self.voice_channel, allow_access=False)
-    )
 
 
 @bot.event
@@ -258,21 +211,15 @@ async def on_voice_state_update(
     after: discord.VoiceState,
 ):
   if after.channel and after.channel.name == "➕ ┃ Создать комнатку":
-    category = after.channel.category
     new_channel = await member.guild.create_voice_channel(
-        name=f"🔊 Комната {member.display_name}", category=category
+        name=f"🔊 Комната {member.display_name}", category=after.channel.category
     )
     VOICE_OWNERS[new_channel.id] = member.id
     await member.move_to(new_channel)
-
-    embed = discord.Embed(
-        title="🎛️ Управление вашей приватной комнатой",
-        description="Используйте кнопки ниже для настройки:",
-        color=discord.Color.blue(),
-    )
     try:
       await member.send(
-          embed=embed, view=VoiceControlView(new_channel, member.id)
+          "🎛️ Панель управления вашей комнатой:",
+          view=VoiceControlView(new_channel, member.id),
       )
     except:
       pass
@@ -282,50 +229,44 @@ async def on_voice_state_update(
       del VOICE_OWNERS[before.channel.id]
       try:
         await before.channel.delete()
-      except Exception:
+      except:
         pass
 
 
 @bot.command(name="setup_voice")
 @commands.has_permissions(administrator=True)
 async def setup_voice(ctx):
-  guild = ctx.guild
-  category = discord.utils.get(guild.categories, name="🔊 ┃ ПРИВАТНЫЕ КОМНАТЫ")
+  category = discord.utils.get(ctx.guild.categories, name="🔊 ┃ ПРИВАТНЫЕ КОМНАТЫ")
   if not category:
-    category = await guild.create_category("🔊 ┃ ПРИВАТНЫЕ КОМНАТЫ")
-
-  existing = discord.utils.get(
+    category = await ctx.guild.create_category("🔊 ┃ ПРИВАТНЫЕ КОМНАТЫ")
+  if not discord.utils.get(
       category.voice_channels, name="➕ ┃ Создать комнатку"
-  )
-  if not existing:
-    await guild.create_voice_channel(
+  ):
+    await ctx.guild.create_voice_channel(
         name="➕ ┃ Создать комнатку", category=category
     )
-    await ctx.send("✅ Система приватных голосовых комнат успешно установлена!")
+    await ctx.send("✅ Система приватных войсов установлена!")
   else:
-    await ctx.send("ℹ️ Триггерный канал уже существует!")
+    await ctx.send("ℹ️ Триггер уже существует.")
 
 
 @bot.command(name="vpanel")
 async def voice_panel(ctx):
   if not ctx.author.voice or not ctx.author.voice.channel:
-    await ctx.send("❌ Вы должны находиться в своей голосовой комнате!")
-    return
+    return await ctx.send("❌ Вы не в голосовом канале!")
   channel = ctx.author.voice.channel
   owner_id = VOICE_OWNERS.get(channel.id)
   if not owner_id or (
       owner_id != ctx.author.id and not ctx.author.guild_permissions.administrator
   ):
-    await ctx.send("❌ Вы не владелец этой комнаты!")
-    return
-  embed = discord.Embed(
-      title=f"🎛️ Управление — {channel.name}", color=discord.Color.blue()
+    return await ctx.send("❌ Вы не владелец этой комнаты!")
+  await ctx.send(
+      "🎛️ Управление комнатой:", view=VoiceControlView(channel, owner_id)
   )
-  await ctx.send(embed=embed, view=VoiceControlView(channel, owner_id))
 
 
 # ==========================================
-# 3. СИСТЕМА ТИКЕТОВ И АВТО-РОЛИ ПО КНОПКАМ
+# 3. ТИКЕТЫ И АВТО-РОЛИ
 # ==========================================
 
 
@@ -337,13 +278,11 @@ class CloseTicketView(discord.ui.View):
   @discord.ui.button(
       label="Закрыть тикет", style=discord.ButtonStyle.danger, emoji="🔒"
   )
-  async def close_ticket(
+  async def close(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
-    await interaction.response.send_message(
-        "⏳ Тикет будет удален через 5 секунд..."
-    )
-    await asyncio.sleep(5)
+    await interaction.response.send_message("⏳ Удаление через 3 сек...")
+    await asyncio.sleep(3)
     await interaction.channel.delete()
 
 
@@ -355,7 +294,7 @@ class TicketCreateView(discord.ui.View):
   @discord.ui.button(
       label="Открыть тикет", style=discord.ButtonStyle.success, emoji="📩"
   )
-  async def create_ticket(
+  async def create(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
     guild = interaction.guild
@@ -364,38 +303,33 @@ class TicketCreateView(discord.ui.View):
     if not category:
       category = await guild.create_category("🎫 ┃ ТИКЕТЫ И ПОДДЕРЖКА")
 
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        user: discord.PermissionOverwrite(
-            read_messages=True, send_messages=True
-        ),
-        guild.me: discord.PermissionOverwrite(
-            read_messages=True, send_messages=True
-        ),
-    }
-
-    channel_name = f"ticket-{user.name}".lower().replace(" ", "-")
-    existing_channel = discord.utils.get(guild.channels, name=channel_name)
-    if existing_channel:
-      await interaction.response.send_message(
-          f"❌ У вас уже открыт тикет: {existing_channel.mention}",
-          ephemeral=True,
+    name = f"ticket-{user.name}".lower()
+    if discord.utils.get(guild.channels, name=name):
+      return await interaction.response.send_message(
+          "❌ У вас уже открыт тикет!", ephemeral=True
       )
-      return
 
-    ticket_channel = await guild.create_text_channel(
-        name=channel_name, category=category, overwrites=overwrites
+    ch = await guild.create_text_channel(
+        name=name,
+        category=category,
+        overwrites={
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            user: discord.PermissionOverwrite(
+                read_messages=True, send_messages=True
+            ),
+        },
     )
-    embed = discord.Embed(
-        title=f"🎫 Тикет пользователя {user.name}",
-        description="Опишите вашу проблему. Администрация скоро ответит!",
-        color=discord.Color.blue(),
-    )
-    await ticket_channel.send(
-        content=f"{user.mention}", embed=embed, view=CloseTicketView()
+    await ch.send(
+        f"{user.mention}",
+        embed=discord.Embed(
+            title="🎫 Поддержка",
+            description="Опишите вашу проблему.",
+            color=discord.Color.blue(),
+        ),
+        view=CloseTicketView(),
     )
     await interaction.response.send_message(
-        f"✅ Тикет создан: {ticket_channel.mention}", ephemeral=True
+        f"✅ Тикет создан: {ch.mention}", ephemeral=True
     )
 
 
@@ -403,12 +337,14 @@ class TicketCreateView(discord.ui.View):
 @commands.has_permissions(administrator=True)
 async def ticket_panel(ctx):
   await ctx.message.delete()
-  embed = discord.Embed(
-      title="📩 Поддержка и Обратная Связь",
-      description="Нажмите на кнопку ниже, чтобы открыть тикет.",
-      color=discord.Color.purple(),
+  await ctx.send(
+      embed=discord.Embed(
+          title="📩 Поддержка",
+          description="Нажмите кнопку ниже, чтобы открыть тикет.",
+          color=discord.Color.purple(),
+      ),
+      view=TicketCreateView(),
   )
-  await ctx.send(embed=embed, view=TicketCreateView())
 
 
 class SelfRolesView(discord.ui.View):
@@ -416,53 +352,37 @@ class SelfRolesView(discord.ui.View):
   def __init__(self):
     super().__init__(timeout=None)
 
-  async def toggle_role(
-      self, interaction: discord.Interaction, role_name: str
-  ):
-    role = discord.utils.get(interaction.guild.roles, name=role_name)
-    if not role:
-      await interaction.response.send_message(
-          f"❌ Роль `{role_name}` не найдена!", ephemeral=True
-      )
-      return
+  @discord.ui.button(
+      label="VIP Участник", style=discord.ButtonStyle.secondary, emoji="⭐"
+  )
+  async def r1(self, interaction: discord.Interaction, button: discord.ui.Button):
+    role = discord.utils.get(interaction.guild.roles, name="⭐ ┃ VIP Участник")
     if role in interaction.user.roles:
       await interaction.user.remove_roles(role)
       await interaction.response.send_message(
-          f"➖ Роль **{role.name}** снята!", ephemeral=True
+          "➖ Роль VIP снята!", ephemeral=True
       )
     else:
       await interaction.user.add_roles(role)
-      await interaction.response.send_message(
-          f"➕ Роль **{role.name}** выдана!", ephemeral=True
-      )
-
-  @discord.ui.button(
-      label="Ивентер", style=discord.ButtonStyle.primary, emoji="🎉"
-  )
-  async def r1(self, interaction: discord.Interaction, button: discord.ui.Button):
-    await self.toggle_role(interaction, "🎉 ┃ Ивентер")
-
-  @discord.ui.button(
-      label="VIP", style=discord.ButtonStyle.secondary, emoji="⭐"
-  )
-  async def r2(self, interaction: discord.Interaction, button: discord.ui.Button):
-    await self.toggle_role(interaction, "⭐ ┃ VIP Участник")
+      await interaction.response.send_message("➕ Роль VIP выдана!", ephemeral=True)
 
 
 @bot.command(name="roles_panel")
 @commands.has_permissions(administrator=True)
 async def roles_panel(ctx):
   await ctx.message.delete()
-  embed = discord.Embed(
-      title="🎭 Выбор Ролей",
-      description="Нажмите кнопку, чтобы получить роль.",
-      color=discord.Color.gold(),
+  await ctx.send(
+      embed=discord.Embed(
+          title="🎭 Авто-роли",
+          description="Нажмите кнопку для получения роли.",
+          color=discord.Color.gold(),
+      ),
+      view=SelfRolesView(),
   )
-  await ctx.send(embed=embed, view=SelfRolesView())
 
 
 # ==========================================
-# 4. АДМИН-ПАНЕЛЬ И МОДЕРАЦИЯ С ВЫБОРОМ МУТА
+# 4. АДМИН-ПАНЕЛЬ И МОДЕРАЦИЯ
 # ==========================================
 
 
@@ -481,16 +401,11 @@ def is_server_owner():
 class ModModal(discord.ui.Modal):
 
   def __init__(self, action_type: str, mute_duration: int = 10):
-    title_map = {
-        "ban": "Бан участника",
-        "kick": "Кик участника",
-        "mute": f"Мут на {mute_duration} мин.",
-    }
-    super().__init__(title=title_map.get(action_type, "Модерация"))
+    super().__init__(title=f"Модерация: {action_type.upper()}")
     self.action_type = action_type
     self.mute_duration = mute_duration
     self.target_id = discord.ui.TextInput(
-        label="ID пользователя", placeholder="Введите ID...", required=True
+        label="ID пользователя", placeholder="ID...", required=True
     )
     self.reason = discord.ui.TextInput(
         label="Причина", placeholder="Причина...", required=False
@@ -505,31 +420,26 @@ class ModModal(discord.ui.Modal):
       )
       if not member:
         return await interaction.response.send_message(
-            "❌ Пользователь не найден!", ephemeral=True
+            "❌ Не найден!", ephemeral=True
         )
-    except ValueError:
+    except:
       return await interaction.response.send_message(
-          "❌ Неверный ID!", ephemeral=True
+          "❌ Ошибка ID!", ephemeral=True
       )
 
-    reason = self.reason.value if self.reason.value else "Не указана"
+    reason = self.reason.value or "Не указана"
     if self.action_type == "ban":
       await member.ban(reason=reason)
-      await interaction.response.send_message(
-          f"🔨 Заблокирован **{member}**. Причина: `{reason}`"
-      )
+      await interaction.response.send_message(f"🔨 Заблокирован **{member}**.")
     elif self.action_type == "kick":
       await member.kick(reason=reason)
-      await interaction.response.send_message(
-          f"👢 Изгнан **{member}**. Причина: `{reason}`"
-      )
+      await interaction.response.send_message(f"👢 Изгнан **{member}**.")
     elif self.action_type == "mute":
       await member.timeout(
           datetime.timedelta(minutes=self.mute_duration), reason=reason
       )
       await interaction.response.send_message(
-          f"🔇 Мут **{member}** на {self.mute_duration} мин. Причина:"
-          f" `{reason}`"
+          f"🔇 Мут **{member}** на {self.mute_duration} мин."
       )
 
 
@@ -537,20 +447,16 @@ class MuteSelect(discord.ui.Select):
 
   def __init__(self):
     options = [
-        discord.SelectOption(label="5 минут", value="5", emoji="⏱️"),
-        discord.SelectOption(label="15 минут", value="15", emoji="⏳"),
-        discord.SelectOption(label="1 час", value="60", emoji="⏰"),
-        discord.SelectOption(label="1 день", value="1440", emoji="📅"),
-        discord.SelectOption(label="1 неделя", value="10080", emoji="🛑"),
+        discord.SelectOption(label="5 минут", value="5"),
+        discord.SelectOption(label="15 минут", value="15"),
+        discord.SelectOption(label="1 час", value="60"),
+        discord.SelectOption(label="1 день", value="1440"),
     ]
-    super().__init__(
-        placeholder="📌 Выберите время мута...", options=options
-    )
+    super().__init__(placeholder="📌 Выберите время мута...", options=options)
 
   async def callback(self, interaction: discord.Interaction):
-    duration = int(self.values[0])
     await interaction.response.send_modal(
-        ModModal("mute", mute_duration=duration)
+        ModModal("mute", mute_duration=int(self.values[0]))
     )
 
 
@@ -583,85 +489,57 @@ class AdminPanelView(discord.ui.View):
   )
   async def m(self, interaction: discord.Interaction, button: discord.ui.Button):
     await interaction.response.send_message(
-        "Выберите время для мута:", view=MuteView(), ephemeral=True
+        "Выберите время:", view=MuteView(), ephemeral=True
     )
 
 
 @bot.command(name="admin")
 @commands.has_permissions(administrator=True)
 async def admin_panel(ctx):
-  embed = discord.Embed(
-      title="🛡️ Панель Администратора",
-      description="Используйте кнопки для быстрого наказания нарушителей.",
-      color=discord.Color.gold(),
+  await ctx.send(
+      embed=discord.Embed(
+          title="🛡️ Панель Администратора", color=discord.Color.gold()
+      ),
+      view=AdminPanelView(),
   )
-  await ctx.send(embed=embed, view=AdminPanelView())
 
 
 # ==========================================
-# 5. СБРОС И ОЧИСТКА СЕРВЕРА (!clear / !setup)
+# 5. ОЧИСТКА И НАСТРОЙКА СЕРВЕРА
 # ==========================================
-
-
 @bot.command(name="clear")
 @is_server_owner()
 async def clear_server(ctx):
   guild = ctx.guild
-  await ctx.send("⚠️ Начинаю полное очищение и настройку сервера...")
+  await ctx.send("⚠️ Сброс и настройка сервера...")
   for channel in guild.channels:
     try:
       await channel.delete()
-    except Exception:
+    except:
       pass
 
-  roles_data = [
-      {
-          "name": "👑 ┃ Создатель",
-          "color": discord.Color.red(),
-          "permissions": discord.Permissions(administrator=True),
-          "hoist": True,
-      },
-      {
-          "name": "🛡️ ┃ Главный Администратор",
-          "color": discord.Color.orange(),
-          "permissions": discord.Permissions(administrator=True),
-          "hoist": True,
-      },
-      {
-          "name": "🔨 ┃ Модератор",
-          "color": discord.Color.blue(),
-          "permissions": discord.Permissions(
-              kick_members=True, ban_members=True, manage_messages=True
-          ),
-          "hoist": True,
-      },
-      {
-          "name": "🎉 ┃ Ивентер",
-          "color": discord.Color.magenta(),
-          "permissions": discord.Permissions(manage_events=True),
-          "hoist": True,
-      },
-      {
-          "name": "⭐ ┃ VIP Участник",
-          "color": discord.Color.purple(),
-          "permissions": discord.Permissions.none(),
-          "hoist": True,
-      },
-      {
-          "name": "👤 ┃ Участник",
-          "color": discord.Color.default(),
-          "permissions": discord.Permissions.none(),
-          "hoist": True,
-      },
+  roles = [
+      ("👑 ┃ Создатель", discord.Color.red(), discord.Permissions(administrator=True)),
+      (
+          "🛡️ ┃ Главный Администратор",
+          discord.Color.orange(),
+          discord.Permissions(administrator=True),
+      ),
+      (
+          "🔨 ┃ Модератор",
+          discord.Color.blue(),
+          discord.Permissions(kick_members=True, ban_members=True),
+      ),
+      (
+          "⭐ ┃ VIP Участник",
+          discord.Color.purple(),
+          discord.Permissions.none(),
+      ),
+      ("👤 ┃ Участник", discord.Color.default(), discord.Permissions.none()),
   ]
-  for r in roles_data:
-    if not discord.utils.get(guild.roles, name=r["name"]):
-      await guild.create_role(
-          name=r["name"],
-          color=r["color"],
-          permissions=r["permissions"],
-          hoist=r["hoist"],
-      )
+  for name, col, perms in roles:
+    if not discord.utils.get(guild.roles, name=name):
+      await guild.create_role(name=name, color=col, permissions=perms, hoist=True)
 
   cat_info = await guild.create_category("📌 ┃ НАВИГАЦИЯ И ИНФО")
   await guild.create_text_channel(
@@ -692,11 +570,20 @@ async def clear_server(ctx):
       },
   )
 
+  cat_admin = await guild.create_category("🛡️ ┃ УПРАВЛЕНИЕ")
+  await guild.create_text_channel(
+      "🛠️・логи-сервера",
+      category=cat_admin,
+      overwrites={
+          guild.default_role: discord.PermissionOverwrite(read_messages=False)
+      },
+  )
+
   cat_voice = await guild.create_category("🔊 ┃ ПРИВАТНЫЕ КОМНАТЫ")
   await guild.create_voice_channel("🔊 ┃ Главный Лобби", category=cat_voice)
   await guild.create_voice_channel("➕ ┃ Создать комнатку", category=cat_voice)
 
-  await news.send("✅ **Сервер полностью очищен и настроен заново!**")
+  await news.send("✅ **Сервер полностью настроен!**")
 
 
 @bot.command(name="setup")
@@ -706,7 +593,7 @@ async def setup_server(ctx):
 
 
 # ==========================================
-# 6. ЭКОНОМИКА С КУЛДАУНАМИ И РАЗВЛЕЧЕНИЯ
+# 6. ЭКОНОМИКА, МАГАЗИН И МИНИ-ИГРЫ
 # ==========================================
 
 
@@ -720,43 +607,103 @@ async def balance(ctx, member: discord.Member = None):
 @bot.command(name="daily")
 @commands.cooldown(1, 86400, commands.BucketType.user)
 async def daily(ctx):
-  uid = ctx.author.id
-  USER_ECONOMY[uid] = USER_ECONOMY.get(uid, 0) + 500
-  await ctx.send(f"🎁 {ctx.author.mention}, вы получили ежедневный бонус **500** 🪙!")
+  USER_ECONOMY[ctx.author.id] = USER_ECONOMY.get(ctx.author.id, 0) + 500
+  await ctx.send(f"🎁 {ctx.author.mention}, ежедневный бонус **500** 🪙 забран!")
 
 
 @daily.error
 async def daily_error(ctx, error):
   if isinstance(error, commands.CommandOnCooldown):
-    hours = round(error.retry_after / 3600, 1)
     await ctx.send(
-        f"⏳ {ctx.author.mention}, вы уже получали бонус сегодня! Попробуйте через"
-        f" **{hours}** ч.",
-        delete_after=10,
+        f"⏳ Подождите еще **{round(error.retry_after / 3600, 1)}** ч.",
+        delete_after=5,
     )
 
 
 @bot.command(name="work")
 @commands.cooldown(1, 3600, commands.BucketType.user)
 async def work(ctx):
-  uid = ctx.author.id
   earned = random.randint(50, 250)
-  USER_ECONOMY[uid] = USER_ECONOMY.get(uid, 0) + earned
+  USER_ECONOMY[ctx.author.id] = USER_ECONOMY.get(ctx.author.id, 0) + earned
   await ctx.send(
-      f"💼 {ctx.author.mention}, вы успешно поработали и заработали"
-      f" **{earned}** 🪙!"
+      f"💼 {ctx.author.mention}, вы заработали **{earned}** 🪙 на работе!"
   )
 
 
 @work.error
 async def work_error(ctx, error):
   if isinstance(error, commands.CommandOnCooldown):
-    minutes = round(error.retry_after / 60)
     await ctx.send(
-        f"⏳ {ctx.author.mention}, вы устали! Следующая смена будет доступна"
-        f" через **{minutes}** мин.",
-        delete_after=10,
+        f"⏳ На работу можно через **{round(error.retry_after / 60)}** мин.",
+        delete_after=5,
     )
+
+
+@bot.command(name="shop")
+async def shop(ctx):
+  embed = discord.Embed(
+      title="🛍️ Магазин ролей",
+      description="Купите роль с помощью `!buy [ID]`",
+      color=discord.Color.blue(),
+  )
+  for item_id, info in ROLE_SHOP.items():
+    embed.add_field(
+        name=f"[{item_id}] {info['name']}",
+        value=f"Цена: **{info['price']}** 🪙",
+        inline=False,
+    )
+  await ctx.send(embed=embed)
+
+
+@bot.command(name="buy")
+async def buy(ctx, item_id: int):
+  if item_id not in ROLE_SHOP:
+    return await ctx.send("❌ Товара с таким ID не существует!")
+  item = ROLE_SHOP[item_id]
+  bal = USER_ECONOMY.get(ctx.author.id, 0)
+  if bal < item["price"]:
+    return await ctx.send("❌ У вас недостаточно монет!")
+
+  role = discord.utils.get(ctx.guild.roles, name=item["name"])
+  if not role:
+    return await ctx.send("❌ Ошибка: Роль не найдена на сервере.")
+
+  USER_ECONOMY[ctx.author.id] -= item["price"]
+  await ctx.author.add_roles(role)
+  await ctx.send(
+      f"✅ Вы успешно приобрели роль **{role.name}** за **{item['price']}** 🪙!"
+  )
+
+
+@bot.command(name="rank")
+async def rank(ctx, member: discord.Member = None):
+  m = member or ctx.author
+  xp, lvl = USER_XP.get(m.id, [0, 1])
+  await ctx.send(
+      f"📊 Уровень **{m.display_name}**: **{lvl}** (Опыт: **{xp}/{lvl*100}** XP)"
+  )
+
+
+@bot.command(name="duel")
+async def duel(ctx, member: discord.Member, bet: int):
+  if member == ctx.author or member.bot:
+    return await ctx.send("❌ Нельзя вызвать этого участника на дуэль!")
+  bal1 = USER_ECONOMY.get(ctx.author.id, 0)
+  bal2 = USER_ECONOMY.get(member.id, 0)
+  if bet <= 0 or bal1 < bet or bal2 < bet:
+    return await ctx.send(
+        "❌ У кого-то из игроков недостаточно монет или ставка неверная!"
+    )
+
+  winner = random.choice([ctx.author, member])
+  loser = member if winner == ctx.author else ctx.author
+
+  USER_ECONOMY[winner.id] += bet
+  USER_ECONOMY[loser.id] -= bet
+  await ctx.send(
+      f"⚔️ Дуэль между {ctx.author.mention} и {member.mention} на **{bet}** 🪙!\n🏆"
+      f" Победитель: **{winner.name}**!"
+  )
 
 
 @bot.command(name="slot")
@@ -782,51 +729,57 @@ async def slot(ctx, bet: int = 10):
     await ctx.send(f"🎰 | {' | '.join(res)} |\n😢 Вы проиграли **{bet}** 🪙.")
 
 
+@bot.command(name="roll")
+async def roll_dice(ctx):
+  await ctx.send(
+      f"🎲 **{ctx.author.name}** бросил кубик: **{random.randint(1, 100)}** (из"
+      " 100)"
+  )
+
+
+@bot.command(name="coinflip")
+async def coinflip(ctx):
+  await ctx.send(
+      f"🪙 **{ctx.author.name}** подбросил монетку: **{random.choice(['Орёл', 'Решка'])}**"
+  )
+
+
 @bot.command(name="ping")
 async def ping(ctx):
-  await ctx.send(f"pong! 🏓 Задержка: **{round(bot.latency * 1000)}мс**")
+  await ctx.send(f"pong! 🏓 `{round(bot.latency * 1000)}мс`")
 
 
 # ==========================================
 # 7. МЕНЮ ПОМОЩИ (!help)
 # ==========================================
-
-
 @bot.command(name="help")
 async def custom_help(ctx):
   embed = discord.Embed(
       title="📜 Меню помощи",
-      description="Список категорий команд:",
+      description="Все доступные команды бота:",
       color=discord.Color.blue(),
   )
   embed.add_field(
-      name="👑 Создатель",
-      value="`!setup` / `!clear` — Сброс и настройка сервера",
+      name="👑 Владелец",
+      value="`!setup` / `!clear` — Сброс сервера\n`!setup_voice` — Войсы",
       inline=False,
   )
   embed.add_field(
-      name="🔊 Голосовые комнаты",
+      name="🛡️ Модерация",
       value=(
-          "`!setup_voice` — Установить систему приватных войсов\n`!vpanel` —"
-          " Панель управления комнатой"
+          "`!admin` — Админ-панель\n`!ticket_panel` — Тикеты\n`!roles_panel` —"
+          " Авто-роли"
       ),
       inline=False,
   )
   embed.add_field(
-      name="🛡️ Администрирование",
-      value=(
-          "`!admin` — Админ-панель (с выбором времени мута)\n`!ticket_panel` —"
-          " Панель тикетов\n`!roles_panel` — Авто-роли\n`!ban` / `!kick` / `!mute`"
-          " — Наказания"
-      ),
+      name="💰 Экономика и Магазин",
+      value="`!balance` | `!daily` | `!work` | `!shop` | `!buy` | `!duel`",
       inline=False,
   )
   embed.add_field(
-      name="🎉 Экономика и Развлечения",
-      value=(
-          "`!balance` / `!daily` (1 раз в день) / `!work` (1 раз в час) /"
-          " `!slot` — Экономика\n`!ping` — Пинг"
-      ),
+      name="🎮 Игры и Уровни",
+      value="`!rank` | `!slot` | `!roll` | `!coinflip` | `!ping`",
       inline=False,
   )
   await ctx.send(embed=embed)
