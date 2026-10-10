@@ -1,9 +1,12 @@
 import asyncio
 import datetime
+import json
 import os
 import random
+import re
+
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 intents = discord.Intents.default()
 intents.guilds = True
@@ -13,17 +16,27 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 bot.remove_command("help")
 
-# Базы данных в памяти
+# Базы данных (хранятся в памяти, автосохранение в data.json — см. раздел 8)
 USER_WARNINGS = {}  # {user_id: [причины]}
 USER_ECONOMY = {}  # {user_id: баланс}
 USER_XP = {}  # {user_id: [xp, level]}
 VOICE_OWNERS = {}  # {channel_id: owner_id}
+
+# Доступ к данным из Cog'а с новыми командами
+bot.economy = USER_ECONOMY
+bot.xp = USER_XP
+bot.user_warnings = USER_WARNINGS
 
 # Магазин ролей: {item_id: {"name": "Название роли", "price": цена}}
 ROLE_SHOP = {
     1: {"name": "⭐ ┃ VIP Участник", "price": 1000},
     2: {"name": "🎉 ┃ Ивентер", "price": 2500},
 }
+
+
+@bot.event
+async def setup_hook():
+  await bot.add_cog(Extras(bot))
 
 
 @bot.event
@@ -65,7 +78,7 @@ async def on_member_join(member: discord.Member):
   if role:
     try:
       await member.add_roles(role)
-    except:
+    except discord.HTTPException:
       pass
 
   channel = discord.utils.get(member.guild.text_channels, name="💬・общий-чат")
@@ -137,15 +150,18 @@ class LimitVoiceModal(discord.ui.Modal):
   async def on_submit(self, interaction: discord.Interaction):
     try:
       val = int(self.limit.value)
-      if 0 <= val <= 99:
-        await self.voice_channel.edit(user_limit=val)
-        await interaction.response.send_message(
-            f"👥 Лимит установлен на: **{val}**", ephemeral=True
-        )
-    except:
-      await interaction.response.send_message(
+    except ValueError:
+      return await interaction.response.send_message(
           "❌ Ошибка ввода числа!", ephemeral=True
       )
+    if not 0 <= val <= 99:
+      return await interaction.response.send_message(
+          "❌ Лимит должен быть от 0 до 99!", ephemeral=True
+      )
+    await self.voice_channel.edit(user_limit=val)
+    await interaction.response.send_message(
+        f"👥 Лимит установлен на: **{val}**", ephemeral=True
+    )
 
 
 class VoiceControlView(discord.ui.View):
@@ -221,7 +237,7 @@ async def on_voice_state_update(
           "🎛️ Панель управления вашей комнатой:",
           view=VoiceControlView(new_channel, member.id),
       )
-    except:
+    except discord.HTTPException:
       pass
 
   if before.channel and before.channel.id in VOICE_OWNERS:
@@ -229,7 +245,7 @@ async def on_voice_state_update(
       del VOICE_OWNERS[before.channel.id]
       try:
         await before.channel.delete()
-      except:
+      except discord.HTTPException:
         pass
 
 
@@ -418,28 +434,33 @@ class ModModal(discord.ui.Modal):
       member = interaction.guild.get_member(
           int(self.target_id.value.strip("<@!>"))
       )
-      if not member:
-        return await interaction.response.send_message(
-            "❌ Не найден!", ephemeral=True
-        )
-    except:
+    except ValueError:
       return await interaction.response.send_message(
           "❌ Ошибка ID!", ephemeral=True
       )
+    if not member:
+      return await interaction.response.send_message(
+          "❌ Не найден!", ephemeral=True
+      )
 
     reason = self.reason.value or "Не указана"
-    if self.action_type == "ban":
-      await member.ban(reason=reason)
-      await interaction.response.send_message(f"🔨 Заблокирован **{member}**.")
-    elif self.action_type == "kick":
-      await member.kick(reason=reason)
-      await interaction.response.send_message(f"👢 Изгнан **{member}**.")
-    elif self.action_type == "mute":
-      await member.timeout(
-          datetime.timedelta(minutes=self.mute_duration), reason=reason
-      )
+    try:
+      if self.action_type == "ban":
+        await member.ban(reason=reason)
+        await interaction.response.send_message(f"🔨 Заблокирован **{member}**.")
+      elif self.action_type == "kick":
+        await member.kick(reason=reason)
+        await interaction.response.send_message(f"👢 Изгнан **{member}**.")
+      elif self.action_type == "mute":
+        await member.timeout(
+            datetime.timedelta(minutes=self.mute_duration), reason=reason
+        )
+        await interaction.response.send_message(
+            f"🔇 Мут **{member}** на {self.mute_duration} мин."
+        )
+    except discord.Forbidden:
       await interaction.response.send_message(
-          f"🔇 Мут **{member}** на {self.mute_duration} мин."
+          "❌ У бота недостаточно прав для этого участника!", ephemeral=True
       )
 
 
@@ -515,7 +536,7 @@ async def clear_server(ctx):
   for channel in guild.channels:
     try:
       await channel.delete()
-    except:
+    except discord.HTTPException:
       pass
 
   roles = [
@@ -684,6 +705,68 @@ async def rank(ctx, member: discord.Member = None):
   )
 
 
+class DuelView(discord.ui.View):
+  """Дуэль с подтверждением от соперника."""
+
+  def __init__(self, challenger: discord.Member, opponent: discord.Member, bet: int):
+    super().__init__(timeout=60)
+    self.challenger = challenger
+    self.opponent = opponent
+    self.bet = bet
+    self.message = None
+
+  async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    if interaction.user != self.opponent:
+      await interaction.response.send_message(
+          "❌ Это вызов не для вас!", ephemeral=True
+      )
+      return False
+    return True
+
+  def _disable(self):
+    for child in self.children:
+      child.disabled = True
+
+  async def on_timeout(self):
+    self._disable()
+    if self.message:
+      await self.message.edit(content="⌛ Вызов на дуэль истёк.", view=self)
+
+  @discord.ui.button(label="Принять", style=discord.ButtonStyle.success, emoji="⚔️")
+  async def accept(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    self._disable()
+    self.stop()
+    bal1 = USER_ECONOMY.get(self.challenger.id, 0)
+    bal2 = USER_ECONOMY.get(self.opponent.id, 0)
+    if bal1 < self.bet or bal2 < self.bet:
+      return await interaction.response.edit_message(
+          content="❌ У кого-то из игроков уже не хватает монет!", view=self
+      )
+    winner = random.choice([self.challenger, self.opponent])
+    loser = self.opponent if winner == self.challenger else self.challenger
+    USER_ECONOMY[winner.id] = USER_ECONOMY.get(winner.id, 0) + self.bet
+    USER_ECONOMY[loser.id] = USER_ECONOMY.get(loser.id, 0) - self.bet
+    await interaction.response.edit_message(
+        content=(
+            f"⚔️ Дуэль {self.challenger.mention} vs {self.opponent.mention} на"
+            f" **{self.bet}** 🪙!\n🏆 Победитель: **{winner.display_name}**!"
+        ),
+        view=self,
+    )
+
+  @discord.ui.button(label="Отклонить", style=discord.ButtonStyle.danger, emoji="✖️")
+  async def decline(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    self._disable()
+    self.stop()
+    await interaction.response.edit_message(
+        content=f"🏳️ {self.opponent.mention} отклонил(а) дуэль.", view=self
+    )
+
+
 @bot.command(name="duel")
 async def duel(ctx, member: discord.Member, bet: int):
   if member == ctx.author or member.bot:
@@ -694,15 +777,11 @@ async def duel(ctx, member: discord.Member, bet: int):
     return await ctx.send(
         "❌ У кого-то из игроков недостаточно монет или ставка неверная!"
     )
-
-  winner = random.choice([ctx.author, member])
-  loser = member if winner == ctx.author else ctx.author
-
-  USER_ECONOMY[winner.id] += bet
-  USER_ECONOMY[loser.id] -= bet
-  await ctx.send(
-      f"⚔️ Дуэль между {ctx.author.mention} и {member.mention} на **{bet}** 🪙!\n🏆"
-      f" Победитель: **{winner.name}**!"
+  view = DuelView(ctx.author, member, bet)
+  view.message = await ctx.send(
+      f"⚔️ {member.mention}, {ctx.author.mention} вызывает вас на дуэль на"
+      f" **{bet}** 🪙! У вас 60 секунд.",
+      view=view,
   )
 
 
@@ -768,21 +847,437 @@ async def custom_help(ctx):
       name="🛡️ Модерация",
       value=(
           "`!admin` — Админ-панель\n`!ticket_panel` — Тикеты\n`!roles_panel` —"
-          " Авто-роли"
+          " Авто-роли\n`!warn` | `!warns` | `!clearwarns` | `!purge N`\n"
+          "`!giveaway 10m приз` — Розыгрыш"
       ),
       inline=False,
   )
   embed.add_field(
       name="💰 Экономика и Магазин",
-      value="`!balance` | `!daily` | `!work` | `!shop` | `!buy` | `!duel`",
+      value=(
+          "`!balance` | `!daily` | `!work` | `!shop` | `!buy` | `!duel`\n"
+          "`!pay @user сумма` | `!top [money|xp]` | `!roulette ставка цвет`"
+      ),
       inline=False,
   )
   embed.add_field(
       name="🎮 Игры и Уровни",
-      value="`!rank` | `!slot` | `!roll` | `!coinflip` | `!ping`",
+      value=(
+          "`!rank` | `!slot` | `!roll` | `!coinflip` | `!ping`\n"
+          "`!rps` | `!8ball вопрос` | `!rate что-то` | `!choose а | б`"
+      ),
+      inline=False,
+  )
+  embed.add_field(
+      name="🎉 Социальное и инфо",
+      value=(
+          "`!hug/!slap/!pat/!kiss @user` | `!poll вопрос | а | б`\n"
+          "`!remind 10m текст` | `!avatar` | `!userinfo` | `!serverinfo`"
+      ),
       inline=False,
   )
   await ctx.send(embed=embed)
+
+
+# ==========================================
+# 8. НОВЫЕ ФУНКЦИИ (Cog "Extras")
+# ==========================================
+
+DATA_FILE = "data.json"
+
+
+def parse_duration(text: str):
+  """'30s', '10m', '2h', '1d' -> секунды (или None)."""
+  m = re.fullmatch(r"(\d+)([smhd])", text.lower())
+  if not m:
+    return None
+  return int(m[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m[2]]
+
+
+# ---------- Камень-ножницы-бумага ----------
+RPS_EMOJI = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
+RPS_BEATS = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
+
+
+class RPSView(discord.ui.View):
+
+  def __init__(self, author: discord.Member):
+    super().__init__(timeout=30)
+    self.author = author
+
+  async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    if interaction.user != self.author:
+      await interaction.response.send_message(
+          "❌ Это не ваша игра!", ephemeral=True
+      )
+      return False
+    return True
+
+  async def play(self, interaction: discord.Interaction, choice: str):
+    bot_choice = random.choice(list(RPS_EMOJI))
+    if choice == bot_choice:
+      result = "🤝 Ничья!"
+    elif RPS_BEATS[choice] == bot_choice:
+      result = "🎉 Вы победили!"
+    else:
+      result = "😢 Вы проиграли!"
+    for child in self.children:
+      child.disabled = True
+    await interaction.response.edit_message(
+        content=(
+            f"Вы: {RPS_EMOJI[choice]} | Бот: {RPS_EMOJI[bot_choice]}\n{result}"
+        ),
+        view=self,
+    )
+    self.stop()
+
+  @discord.ui.button(label="Камень", emoji="🪨")
+  async def rock(self, interaction: discord.Interaction, button: discord.ui.Button):
+    await self.play(interaction, "rock")
+
+  @discord.ui.button(label="Бумага", emoji="📄")
+  async def paper(self, interaction: discord.Interaction, button: discord.ui.Button):
+    await self.play(interaction, "paper")
+
+  @discord.ui.button(label="Ножницы", emoji="✂️")
+  async def scissors(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await self.play(interaction, "scissors")
+
+
+# ---------- Розыгрыш ----------
+class GiveawayView(discord.ui.View):
+
+  def __init__(self):
+    super().__init__(timeout=None)
+    self.users = set()
+
+  @discord.ui.button(
+      label="Участвовать", style=discord.ButtonStyle.success, emoji="🎉"
+  )
+  async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+    if interaction.user.id in self.users:
+      self.users.remove(interaction.user.id)
+      await interaction.response.send_message(
+          "➖ Вы вышли из розыгрыша.", ephemeral=True
+      )
+    else:
+      self.users.add(interaction.user.id)
+      await interaction.response.send_message(
+          "➕ Вы участвуете в розыгрыше!", ephemeral=True
+      )
+
+
+RED_NUMBERS = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
+COLOR_ALIASES = {
+    "red": "red", "красное": "red", "красный": "red", "к": "red",
+    "black": "black", "черное": "black", "чёрное": "black", "чёрный": "black", "ч": "black",
+    "green": "green", "зеленое": "green", "зелёное": "green", "з": "green",
+}  # fmt: skip
+
+EIGHT_BALL = [
+    "✅ Бесспорно", "✅ Да, определённо", "✅ Скорее всего да",
+    "🤔 Пока не ясно, спроси позже", "🤔 Сконцентрируйся и спроси ещё раз",
+    "❌ Даже не думай", "❌ Мой ответ — нет", "❌ Перспективы не очень",
+]  # fmt: skip
+
+ACTIONS = {
+    "hug": ("🤗", "обнял(а)"),
+    "slap": ("👋", "дал(а) леща"),
+    "pat": ("🫳", "погладил(а) по голове"),
+    "kiss": ("😘", "поцеловал(а)"),
+}
+
+
+class Extras(commands.Cog):
+  """Дополнительные функции бота."""
+
+  def __init__(self, bot: commands.Bot):
+    self.bot = bot
+    self.load_data()
+    self.autosave.start()
+
+  # ---------- Сохранение данных ----------
+  def load_data(self):
+    if not os.path.exists(DATA_FILE):
+      return
+    try:
+      with open(DATA_FILE, encoding="utf-8") as f:
+        data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+      return
+    self.bot.economy.update({int(k): v for k, v in data.get("economy", {}).items()})
+    self.bot.xp.update({int(k): v for k, v in data.get("xp", {}).items()})
+    self.bot.user_warnings.update(
+        {int(k): v for k, v in data.get("warnings", {}).items()}
+    )
+
+  def save_data(self):
+    data = {
+        "economy": self.bot.economy,
+        "xp": self.bot.xp,
+        "warnings": self.bot.user_warnings,
+    }
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+      json.dump(data, f, ensure_ascii=False)
+
+  @tasks.loop(seconds=60)
+  async def autosave(self):
+    self.save_data()
+
+  def cog_unload(self):
+    self.autosave.cancel()
+    self.save_data()
+
+  # ---------- Общий обработчик ошибок ----------
+  @commands.Cog.listener()
+  async def on_command_error(self, ctx: commands.Context, error):
+    if isinstance(error, commands.CommandNotFound):
+      return
+    if ctx.command and ctx.command.has_error_handler():
+      return
+    if isinstance(error, commands.MissingPermissions):
+      await ctx.send("❌ У вас недостаточно прав.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+      await ctx.send(f"❌ Не хватает аргумента: `{error.param.name}`")
+    elif isinstance(error, (commands.BadArgument, commands.MemberNotFound)):
+      await ctx.send("❌ Неверный аргумент (участник не найден или не число).")
+    elif isinstance(error, commands.CommandOnCooldown):
+      await ctx.send(f"⏳ Подождите {error.retry_after:.0f} сек.")
+    elif isinstance(error, commands.CheckFailure):
+      await ctx.send(f"❌ {error}")
+    else:
+      print(f"Ошибка в команде {ctx.command}: {error!r}")
+
+  # ---------- Экономика ----------
+  @commands.command(name="pay")
+  async def pay(self, ctx, member: discord.Member, amount: int):
+    """Перевести монеты другому участнику."""
+    eco = self.bot.economy
+    if member.bot or member == ctx.author or amount <= 0:
+      return await ctx.send("❌ Неверный получатель или сумма.")
+    if eco.get(ctx.author.id, 0) < amount:
+      return await ctx.send("❌ Недостаточно монет!")
+    eco[ctx.author.id] -= amount
+    eco[member.id] = eco.get(member.id, 0) + amount
+    await ctx.send(f"💸 {ctx.author.mention} перевёл {member.mention} **{amount}** 🪙")
+
+  @commands.command(name="top", aliases=["leaderboard", "lb"])
+  async def top(self, ctx, kind: str = "money"):
+    """Топ-10: !top money / !top xp"""
+    if kind.lower() in ("xp", "lvl", "level", "уровень"):
+      items = sorted(
+          self.bot.xp.items(), key=lambda kv: (kv[1][1], kv[1][0]), reverse=True
+      )[:10]
+      title = "📊 Топ по уровню"
+      fmt = lambda v: f"ур. **{v[1]}** ({v[0]} XP)"
+    else:
+      items = sorted(self.bot.economy.items(), key=lambda kv: kv[1], reverse=True)[:10]
+      title = "💰 Топ по балансу"
+      fmt = lambda v: f"**{v}** 🪙"
+    if not items:
+      return await ctx.send("Пока никого в топе.")
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for i, (uid, val) in enumerate(items):
+      m = ctx.guild.get_member(uid)
+      name = m.display_name if m else f"ID {uid}"
+      lines.append(f"{medals[i] if i < 3 else f'`{i + 1}.`'} {name} — {fmt(val)}")
+    await ctx.send(
+        embed=discord.Embed(
+            title=title, description="\n".join(lines), color=discord.Color.gold()
+        )
+    )
+
+  @commands.command(name="roulette", aliases=["rl"])
+  async def roulette(self, ctx, bet: int, color: str):
+    """Рулетка: !roulette 100 красное|чёрное|зелёное"""
+    color = COLOR_ALIASES.get(color.lower())
+    eco = self.bot.economy
+    bal = eco.get(ctx.author.id, 0)
+    if not color:
+      return await ctx.send("❌ Выберите: красное, чёрное или зелёное.")
+    if bet <= 0 or bal < bet:
+      return await ctx.send("❌ Недостаточно монет или неверная ставка!")
+    n = random.randint(0, 36)
+    result = "green" if n == 0 else "red" if n in RED_NUMBERS else "black"
+    emoji = {"red": "🔴", "black": "⚫", "green": "🟢"}[result]
+    if result == color:
+      mult = 14 if result == "green" else 2
+      eco[ctx.author.id] = bal + bet * (mult - 1)
+      await ctx.send(f"🎡 Выпало {emoji} **{n}**\n🎉 Вы выиграли **{bet * mult}** 🪙!")
+    else:
+      eco[ctx.author.id] = bal - bet
+      await ctx.send(f"🎡 Выпало {emoji} **{n}**\n😢 Вы проиграли **{bet}** 🪙.")
+
+  # ---------- Развлечения ----------
+  @commands.command(name="8ball")
+  async def eight_ball(self, ctx, *, question: str):
+    """Магический шар."""
+    await ctx.send(f"🎱 **{question}**\n{random.choice(EIGHT_BALL)}")
+
+  @commands.command(name="rps")
+  async def rps(self, ctx):
+    """Камень-ножницы-бумага с ботом."""
+    await ctx.send("Выбирайте:", view=RPSView(ctx.author))
+
+  @commands.command(name="hug", aliases=["slap", "pat", "kiss"])
+  async def action(self, ctx, member: discord.Member):
+    """!hug / !slap / !pat / !kiss @участник"""
+    emoji, text = ACTIONS[ctx.invoked_with.lower()]
+    await ctx.send(f"{emoji} **{ctx.author.display_name}** {text} **{member.display_name}**")
+
+  @commands.command(name="rate")
+  async def rate(self, ctx, *, thing: str):
+    """Оценить что-нибудь по 10-балльной шкале."""
+    rng = random.Random(thing.lower())  # одна и та же вещь = одна и та же оценка
+    await ctx.send(f"⭐ Я оцениваю **{thing}** на **{rng.randint(0, 10)}/10**")
+
+  @commands.command(name="choose")
+  async def choose(self, ctx, *, options: str):
+    """!choose пицца | суши | бургер"""
+    parts = [p.strip() for p in options.split("|") if p.strip()]
+    if len(parts) < 2:
+      return await ctx.send("❌ Укажите минимум 2 варианта через `|`.")
+    await ctx.send(f"🤔 Я выбираю: **{random.choice(parts)}**")
+
+  @commands.command(name="poll")
+  async def poll(self, ctx, *, text: str):
+    """!poll Вопрос | вариант 1 | вариант 2 ..."""
+    parts = [p.strip() for p in text.split("|") if p.strip()]
+    if len(parts) < 3 or len(parts) > 11:
+      return await ctx.send("❌ Формат: `!poll Вопрос | вариант 1 | вариант 2` (до 10 вариантов)")
+    numbers = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    question, options = parts[0], parts[1:]
+    desc = "\n".join(f"{numbers[i]} {opt}" for i, opt in enumerate(options))
+    msg = await ctx.send(
+        embed=discord.Embed(
+            title=f"📊 {question}", description=desc, color=discord.Color.blurple()
+        )
+    )
+    for i in range(len(options)):
+      await msg.add_reaction(numbers[i])
+
+  @commands.command(name="remind")
+  async def remind(self, ctx, duration: str, *, text: str):
+    """!remind 10m Выключить плиту (s/m/h/d, до 7 дней)"""
+    secs = parse_duration(duration)
+    if not secs or secs > 7 * 86400:
+      return await ctx.send("❌ Формат времени: `30s`, `10m`, `2h`, `1d` (макс. 7д)")
+    await ctx.send(f"⏰ Напомню через **{duration}**: {text}")
+    await asyncio.sleep(secs)
+    await ctx.send(f"⏰ {ctx.author.mention}, напоминание: **{text}**")
+
+  @commands.command(name="giveaway")
+  @commands.has_permissions(administrator=True)
+  async def giveaway(self, ctx, duration: str, *, prize: str):
+    """!giveaway 10m Нитро"""
+    secs = parse_duration(duration)
+    if not secs:
+      return await ctx.send("❌ Формат: `!giveaway 10m Приз`")
+    view = GiveawayView()
+    end = discord.utils.utcnow() + datetime.timedelta(seconds=secs)
+    embed = discord.Embed(
+        title="🎁 РОЗЫГРЫШ",
+        description=f"Приз: **{prize}**\nЗавершится {discord.utils.format_dt(end, 'R')}",
+        color=discord.Color.magenta(),
+    )
+    msg = await ctx.send(embed=embed, view=view)
+    await asyncio.sleep(secs)
+    for child in view.children:
+      child.disabled = True
+    await msg.edit(view=view)
+    if view.users:
+      winner = random.choice(list(view.users))
+      await ctx.send(f"🎉 Победитель розыгрыша **{prize}**: <@{winner}>!")
+    else:
+      await ctx.send("😢 В розыгрыше никто не участвовал.")
+
+  # ---------- Информация ----------
+  @commands.command(name="avatar")
+  async def avatar(self, ctx, member: discord.Member = None):
+    m = member or ctx.author
+    embed = discord.Embed(title=f"Аватар {m.display_name}", color=m.color)
+    embed.set_image(url=m.display_avatar.url)
+    await ctx.send(embed=embed)
+
+  @commands.command(name="userinfo", aliases=["whois"])
+  async def userinfo(self, ctx, member: discord.Member = None):
+    m = member or ctx.author
+    roles = [r.mention for r in m.roles[1:]][::-1]
+    embed = discord.Embed(title=f"👤 {m}", color=m.color)
+    embed.set_thumbnail(url=m.display_avatar.url)
+    embed.add_field(name="ID", value=m.id)
+    embed.add_field(name="Аккаунт создан", value=discord.utils.format_dt(m.created_at, "D"))
+    embed.add_field(
+        name="Зашёл на сервер",
+        value=discord.utils.format_dt(m.joined_at, "D") if m.joined_at else "—",
+    )
+    xp, lvl = self.bot.xp.get(m.id, [0, 1])
+    embed.add_field(name="Уровень", value=f"{lvl} ({xp} XP)")
+    embed.add_field(name="Баланс", value=f"{self.bot.economy.get(m.id, 0)} 🪙")
+    embed.add_field(name="Предупреждения", value=len(self.bot.user_warnings.get(m.id, [])))
+    embed.add_field(
+        name=f"Роли ({len(roles)})",
+        value=" ".join(roles[:15]) or "нет",
+        inline=False,
+    )
+    await ctx.send(embed=embed)
+
+  @commands.command(name="serverinfo", aliases=["server"])
+  async def serverinfo(self, ctx):
+    g = ctx.guild
+    embed = discord.Embed(title=f"🏠 {g.name}", color=discord.Color.blue())
+    if g.icon:
+      embed.set_thumbnail(url=g.icon.url)
+    embed.add_field(name="Владелец", value=g.owner.mention if g.owner else "—")
+    embed.add_field(name="Участников", value=g.member_count)
+    embed.add_field(name="Создан", value=discord.utils.format_dt(g.created_at, "D"))
+    embed.add_field(name="Текстовых каналов", value=len(g.text_channels))
+    embed.add_field(name="Голосовых каналов", value=len(g.voice_channels))
+    embed.add_field(name="Ролей", value=len(g.roles))
+    await ctx.send(embed=embed)
+
+  # ---------- Модерация ----------
+  @commands.command(name="warn")
+  @commands.has_permissions(kick_members=True)
+  async def warn(self, ctx, member: discord.Member, *, reason: str = "Не указана"):
+    """Выдать предупреждение. 3 предупреждения = мут на 1 час."""
+    warns = self.bot.user_warnings.setdefault(member.id, [])
+    warns.append(reason)
+    await ctx.send(f"⚠️ {member.mention} получил предупреждение ({len(warns)}/3): {reason}")
+    if len(warns) >= 3:
+      try:
+        await member.timeout(datetime.timedelta(hours=1), reason="3 предупреждения")
+        warns.clear()
+        await ctx.send(f"🔇 {member.mention} получил мут на 1 час за 3 предупреждения.")
+      except discord.Forbidden:
+        await ctx.send("❌ Не хватает прав, чтобы замутить этого участника.")
+
+  @commands.command(name="warns")
+  @commands.has_permissions(kick_members=True)
+  async def warns(self, ctx, member: discord.Member):
+    warns = self.bot.user_warnings.get(member.id, [])
+    if not warns:
+      return await ctx.send("✅ У участника нет предупреждений.")
+    text = "\n".join(f"`{i + 1}.` {r}" for i, r in enumerate(warns))
+    await ctx.send(embed=discord.Embed(title=f"⚠️ Предупреждения {member}", description=text))
+
+  @commands.command(name="clearwarns")
+  @commands.has_permissions(kick_members=True)
+  async def clearwarns(self, ctx, member: discord.Member):
+    self.bot.user_warnings.pop(member.id, None)
+    await ctx.send(f"✅ Предупреждения {member.mention} сброшены.")
+
+  @commands.command(name="purge")
+  @commands.has_permissions(manage_messages=True)
+  async def purge(self, ctx, amount: int):
+    """Удалить N последних сообщений (до 100)."""
+    if not 1 <= amount <= 100:
+      return await ctx.send("❌ Укажите число от 1 до 100.")
+    deleted = await ctx.channel.purge(limit=amount + 1)
+    await ctx.send(f"🧹 Удалено сообщений: **{len(deleted) - 1}**", delete_after=4)
 
 
 bot.run(os.getenv("DISCORD_TOKEN"))
